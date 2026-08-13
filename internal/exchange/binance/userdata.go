@@ -173,16 +173,33 @@ func handleExecutionReport(data []byte, exchange string, h exchange.Handler) err
 		return err
 	}
 
+	price, err := parseDecimal(r.Price)
+	if err != nil {
+		return err
+	}
+	stopPrice, err := parseDecimal(r.StopPrice)
+	if err != nil {
+		return err
+	}
+	quantity, err := parseDecimal(r.Quantity)
+	if err != nil {
+		return err
+	}
+	filledQty, err := parseDecimal(r.CumFilledQty)
+	if err != nil {
+		return err
+	}
+
 	ord := domain.Order{
 		ID:            strconv.FormatInt(r.OrderID, 10),
 		ClientOrderID: r.ClientID,
 		Symbol:        r.Symbol,
 		Side:          toSide(r.Side),
 		Type:          toOrderType(r.Type),
-		Price:         parseFloat(r.Price),
-		StopPrice:     parseFloat(r.StopPrice),
-		Quantity:      parseFloat(r.Quantity),
-		FilledQty:     parseFloat(r.CumFilledQty),
+		Price:         price,
+		StopPrice:     stopPrice,
+		Quantity:      quantity,
+		FilledQty:     filledQty,
 		Status:        toStatus(r.Status),
 		TimeInForce:   toTimeInForce(r.TimeInForce),
 		CreatedAt:     time.UnixMilli(r.OrderTime),
@@ -193,8 +210,19 @@ func handleExecutionReport(data []byte, exchange string, h exchange.Handler) err
 	}
 
 	// Um fill aconteceu quando há quantidade e preço de última execução.
-	lastQty, lastPrice := parseFloat(r.LastQty), parseFloat(r.LastPrice)
-	if lastQty > 0 && lastPrice > 0 && h.OnTrade != nil {
+	lastQty, err := parseDecimal(r.LastQty)
+	if err != nil {
+		return err
+	}
+	lastPrice, err := parseDecimal(r.LastPrice)
+	if err != nil {
+		return err
+	}
+	if lastQty.Sign() > 0 && lastPrice.Sign() > 0 && h.OnTrade != nil {
+		fee, err := parseDecimal(r.Commission)
+		if err != nil {
+			return err
+		}
 		feeAsset := ""
 		if r.CommissionAsset != nil {
 			feeAsset = *r.CommissionAsset
@@ -207,7 +235,7 @@ func handleExecutionReport(data []byte, exchange string, h exchange.Handler) err
 			Side:      ord.Side,
 			Price:     lastPrice,
 			Quantity:  lastQty,
-			Fee:       parseFloat(r.Commission),
+			Fee:       fee,
 			FeeAsset:  feeAsset,
 			Timestamp: time.UnixMilli(r.TransactTime),
 		})
@@ -224,10 +252,18 @@ func handleBalances(data []byte, exchange string, h exchange.Handler) error {
 		return nil
 	}
 	for _, b := range m.Balances {
+		free, err := parseDecimal(b.Free)
+		if err != nil {
+			return err
+		}
+		locked, err := parseDecimal(b.Locked)
+		if err != nil {
+			return err
+		}
 		h.OnBalanceUpdate(domain.Balance{
 			Asset:  b.Asset,
-			Free:   parseFloat(b.Free),
-			Locked: parseFloat(b.Locked),
+			Free:   free,
+			Locked: locked,
 		})
 	}
 	return nil

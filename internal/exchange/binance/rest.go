@@ -28,21 +28,37 @@ type restOrder struct {
 	TransactTime  int64  `json:"transactTime"`
 }
 
-func (r restOrder) toDomain() domain.Order {
+func (r restOrder) toDomain() (domain.Order, error) {
+	price, err := parseDecimal(r.Price)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	stopPrice, err := parseDecimal(r.StopPrice)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	quantity, err := parseDecimal(r.OrigQty)
+	if err != nil {
+		return domain.Order{}, err
+	}
+	filledQty, err := parseDecimal(r.ExecutedQty)
+	if err != nil {
+		return domain.Order{}, err
+	}
 	return domain.Order{
 		ID:            strconv.FormatInt(r.OrderID, 10),
 		ClientOrderID: r.ClientOrderID,
 		Symbol:        r.Symbol,
 		Side:          toSide(r.Side),
 		Type:          toOrderType(r.Type),
-		Price:         parseFloat(r.Price),
-		StopPrice:     parseFloat(r.StopPrice),
-		Quantity:      parseFloat(r.OrigQty),
-		FilledQty:     parseFloat(r.ExecutedQty),
+		Price:         price,
+		StopPrice:     stopPrice,
+		Quantity:      quantity,
+		FilledQty:     filledQty,
 		Status:        toStatus(r.Status),
 		TimeInForce:   toTimeInForce(r.TimeInForce),
 		CreatedAt:     time.UnixMilli(r.TransactTime),
-	}
+	}, nil
 }
 
 // PlaceOrder envia uma ordem (POST /api/v3/order).
@@ -51,12 +67,12 @@ func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 	params.Set("symbol", req.Symbol)
 	params.Set("side", string(req.Side))
 	params.Set("type", string(req.Type))
-	params.Set("quantity", strconv.FormatFloat(req.Quantity, 'f', -1, 64))
-	if req.Price > 0 {
-		params.Set("price", strconv.FormatFloat(req.Price, 'f', -1, 64))
+	params.Set("quantity", req.Quantity.String())
+	if req.Price.Sign() > 0 {
+		params.Set("price", req.Price.String())
 	}
-	if req.StopPrice > 0 {
-		params.Set("stopPrice", strconv.FormatFloat(req.StopPrice, 'f', -1, 64))
+	if req.StopPrice.Sign() > 0 {
+		params.Set("stopPrice", req.StopPrice.String())
 	}
 	if req.TimeInForce != "" {
 		params.Set("timeInForce", string(req.TimeInForce))
@@ -69,7 +85,7 @@ func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 	if err := c.signedRequest(ctx, httpMethodPost, "/api/v3/order", params, &out); err != nil {
 		return domain.Order{}, err
 	}
-	return out.toDomain(), nil
+	return out.toDomain()
 }
 
 // CancelOrder cancela uma ordem (DELETE /api/v3/order).
@@ -94,8 +110,16 @@ func (c *Client) Balances(ctx context.Context) ([]domain.Balance, error) {
 	}
 	res := make([]domain.Balance, 0, len(out.Balances))
 	for _, b := range out.Balances {
-		bal := domain.Balance{Asset: b.Asset, Free: parseFloat(b.Free), Locked: parseFloat(b.Locked)}
-		if bal.Free == 0 && bal.Locked == 0 {
+		free, err := parseDecimal(b.Free)
+		if err != nil {
+			return nil, err
+		}
+		locked, err := parseDecimal(b.Locked)
+		if err != nil {
+			return nil, err
+		}
+		bal := domain.Balance{Asset: b.Asset, Free: free, Locked: locked}
+		if bal.Free.IsZero() && bal.Locked.IsZero() {
 			continue // ignora saldos zerados
 		}
 		res = append(res, bal)
@@ -113,7 +137,11 @@ func (c *Client) OpenOrders(ctx context.Context, symbol string) ([]domain.Order,
 	}
 	res := make([]domain.Order, 0, len(out))
 	for _, o := range out {
-		res = append(res, o.toDomain())
+		ord, err := o.toDomain()
+		if err != nil {
+			return nil, err
+		}
+		res = append(res, ord)
 	}
 	return res, nil
 }

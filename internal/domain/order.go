@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/shopspring/decimal"
+)
 
 // Side é a direção de uma ordem ou posição.
 type Side string
@@ -20,6 +24,15 @@ const (
 	OrderStopLimit  OrderType = "stop_limit"
 	OrderStopMarket OrderType = "stop_market"
 )
+
+// Valid devolve se o tipo de ordem é conhecido.
+func (t OrderType) Valid() bool {
+	switch t {
+	case OrderMarket, OrderLimit, OrderStop, OrderStopLimit, OrderStopMarket:
+		return true
+	}
+	return false
+}
 
 // OrderStatus é o estado de vida de uma ordem.
 type OrderStatus string
@@ -42,23 +55,33 @@ const (
 	TIFFOK TimeInForce = "FOK" // fill or kill
 )
 
+// Valid devolve se o TimeInForce é conhecido.
+func (t TimeInForce) Valid() bool {
+	switch t {
+	case TIFGTC, TIFIOC, TIFFOK:
+		return true
+	}
+	return false
+}
+
 // Order é uma ordem de compra/venda. É a entidade central do OMS.
+// Dinheiro (preço/quantidade) é decimal.Decimal — nunca float (Fintech #1).
 type Order struct {
-	ID            string      `json:"id"`
-	ClientOrderID string      `json:"client_order_id"`
-	Symbol        string      `json:"symbol"`
-	Exchange      string      `json:"exchange"`
-	Side          Side        `json:"side"`
-	Type          OrderType   `json:"type"`
-	Price         float64     `json:"price"`
-	StopPrice     float64     `json:"stop_price,omitempty"`
-	Quantity      float64     `json:"quantity"`
-	FilledQty     float64     `json:"filled_qty"`
-	AvgFillPrice  float64     `json:"avg_fill_price"`
-	Status        OrderStatus `json:"status"`
-	TimeInForce   TimeInForce `json:"time_in_force"`
-	CreatedAt     time.Time   `json:"created_at"`
-	UpdatedAt     time.Time   `json:"updated_at"`
+	ID            string          `json:"id"`
+	ClientOrderID string          `json:"client_order_id"`
+	Symbol        string          `json:"symbol"`
+	Exchange      string          `json:"exchange"`
+	Side          Side            `json:"side"`
+	Type          OrderType       `json:"type"`
+	Price         decimal.Decimal `json:"price"`
+	StopPrice     decimal.Decimal `json:"stop_price"`
+	Quantity      decimal.Decimal `json:"quantity"`
+	FilledQty     decimal.Decimal `json:"filled_qty"`
+	AvgFillPrice  decimal.Decimal `json:"avg_fill_price"`
+	Status        OrderStatus     `json:"status"`
+	TimeInForce   TimeInForce     `json:"time_in_force"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 // IsOpen devolve se a ordem ainda está ativa (não terminou).

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 )
@@ -120,4 +122,13 @@ func handleTrade(data []byte, exchange string, h exchange.Handler) error {
 func parseFloat(s string) float64 {
 	f, _ := strconv.ParseFloat(s, 64)
 	return f
+}
+
+// parseDecimal converte a string da Binance em decimal exato, propagando erro
+// (nunca silenciosamente 0 — um payload malformado não pode corromper dinheiro).
+func parseDecimal(s string) (decimal.Decimal, error) {
+	if s == "" {
+		return decimal.Zero, nil
+	}
+	return decimal.NewFromString(s)
 }

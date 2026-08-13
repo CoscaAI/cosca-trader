@@ -62,11 +62,11 @@ CREATE TABLE IF NOT EXISTS orders (
     exchange        TEXT NOT NULL,
     side            TEXT NOT NULL,
     type            TEXT NOT NULL,
-    price           REAL,
-    stop_price      REAL,
-    quantity        REAL,
-    filled_qty      REAL,
-    avg_fill_price  REAL,
+    price           TEXT,
+    stop_price      TEXT,
+    quantity        TEXT,
+    filled_qty      TEXT,
+    avg_fill_price  TEXT,
     status          TEXT NOT NULL,
     time_in_force   TEXT,
     created_at      INTEGER,
@@ -79,10 +79,10 @@ CREATE TABLE IF NOT EXISTS trades (
     symbol    TEXT NOT NULL,
     exchange  TEXT NOT NULL,
     side      TEXT NOT NULL,
-    price     REAL,
-    quantity  REAL,
-    quote_qty REAL,
-    fee       REAL,
+    price     TEXT,
+    quantity  TEXT,
+    quote_qty TEXT,
+    fee       TEXT,
     fee_asset TEXT,
     timestamp INTEGER
 );
@@ -91,9 +91,9 @@ CREATE TABLE IF NOT EXISTS positions (
     symbol          TEXT NOT NULL,
     exchange        TEXT NOT NULL,
     side            TEXT NOT NULL,
-    quantity        REAL,
-    avg_entry_price REAL,
-    realized_pnl    REAL,
+    quantity        TEXT,
+    avg_entry_price TEXT,
+    realized_pnl    TEXT,
     opened_at       INTEGER,
     updated_at      INTEGER,
     PRIMARY KEY (symbol, exchange)
@@ -101,8 +101,8 @@ CREATE TABLE IF NOT EXISTS positions (
 
 CREATE TABLE IF NOT EXISTS balances (
     asset  TEXT PRIMARY KEY,
-    free   REAL,
-    locked REAL
+    free   TEXT,
+    locked TEXT
 );
 `
 

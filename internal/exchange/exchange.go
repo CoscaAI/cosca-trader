@@ -9,6 +9,8 @@ package exchange
 import (
 	"context"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 )
 
@@ -55,9 +57,9 @@ type OrderRequest struct {
 	Symbol        string
 	Side          domain.Side
 	Type          domain.OrderType
-	Quantity      float64
-	Price         float64
-	StopPrice     float64
+	Quantity      decimal.Decimal
+	Price         decimal.Decimal
+	StopPrice     decimal.Decimal
 	TimeInForce   domain.TimeInForce
 	ClientOrderID string
 }

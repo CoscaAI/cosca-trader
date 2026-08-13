@@ -3,9 +3,13 @@ package binance
 import (
 	"testing"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 )
+
+func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
 // payload REAL da Binance (executionReport de um fill), com todos os pares
 // case-colliding (e/E, s/S, l/L, z/Z, ...) — regression da colisão.
@@ -37,12 +41,12 @@ func TestHandleExecutionReport(t *testing.T) {
 	if order.Status != domain.OrderFilled || order.Type != domain.OrderLimit {
 		t.Errorf("status/tipo errados: %+v", order)
 	}
-	if order.FilledQty != 1 || order.Price != 0.10264410 {
+	if order.FilledQty.Equal(d("1")) == false || order.Price.Equal(d("0.10264410")) == false {
 		t.Errorf("preço/qty errados: %+v", order)
 	}
 
 	// fill deve gerar um trade com fee asset BNB
-	if trade.Symbol != "ETHBTC" || trade.Price != 0.10264410 || trade.Quantity != 1 {
+	if trade.Symbol != "ETHBTC" || !trade.Price.Equal(d("0.10264410")) || !trade.Quantity.Equal(d("1")) {
 		t.Errorf("trade errado: %+v", trade)
 	}
 	if trade.FeeAsset != "BNB" {
@@ -84,7 +88,7 @@ func TestHandleBalances(t *testing.T) {
 	if len(balances) != 2 {
 		t.Fatalf("esperava 2 saldos, veio %d", len(balances))
 	}
-	if balances[0].Asset != "ETH" || balances[0].Free != 10000 {
+	if balances[0].Asset != "ETH" || !balances[0].Free.Equal(d("10000")) {
 		t.Errorf("saldo ETH errado: %+v", balances[0])
 	}
 }
