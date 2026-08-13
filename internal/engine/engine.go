@@ -7,6 +7,7 @@ package engine
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"time"
 
 	"github.com/CoscaAI/cosca-trader/internal/event"
@@ -49,7 +50,11 @@ func (e *Engine) Emit(ev event.Event) {
 
 	e.Store.Append(ev)
 	if e.DB != nil {
-		_ = e.DB.PersistEvent(ev)
+		if err := e.DB.PersistEvent(ev); err != nil {
+			// Nunca descartar erro de persistência em silêncio: o rastro em
+			// memória e o disco podem divergir.
+			log.Printf("⚠ engine: persistência de evento %s falhou: %v", ev.Type, err)
+		}
 	}
 	e.Hub.Publish(ev)
 	e.Bus.Publish(ev)

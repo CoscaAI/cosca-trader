@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
@@ -48,7 +49,8 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// Sem CORS aberto: o stream expõe ordens/saldos/posições — restringir
+		// a origens confiáveis quando houver cliente web.
 
 		sub := e.Hub.Subscribe()
 		defer e.Hub.Unsubscribe(sub)
@@ -75,6 +77,10 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		case http.MethodGet:
 			writeJSON(w, o.Orders())
 		case http.MethodPost:
+			if !authorized(r) {
+				http.Error(w, "não autorizado", http.StatusUnauthorized)
+				return
+			}
 			var req exchange.OrderRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "JSON inválido", http.StatusBadRequest)
@@ -109,8 +115,30 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		writeJSON(w, o.Balances())
 	})
 
+	// /ledger — livro-razão double-entry (saldos por conta + entradas).
+	mux.HandleFunc("/ledger", func(w http.ResponseWriter, r *http.Request) {
+		if o == nil {
+			writeJSON(w, map[string]any{"balances": map[string]any{}, "entries": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{
+			"balances": o.Ledger().Balances(),
+			"entries":  o.Ledger().Entries(),
+		})
+	})
+
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s", port)
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
+}
+
+// authorized verifica o token de API (COSCA_TRADER_TOKEN). Sem token
+// configurado, o modo é desenvolvimento (permissivo, bind em 127.0.0.1).
+func authorized(r *http.Request) bool {
+	token := os.Getenv("COSCA_TRADER_TOKEN")
+	if token == "" {
+		return true
+	}
+	return r.Header.Get("Authorization") == "Bearer "+token
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

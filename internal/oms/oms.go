@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/shopspring/decimal"
@@ -21,6 +22,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/ledger"
 )
 
 // Erros de validação do OMS.
@@ -39,7 +41,7 @@ type OMS struct {
 	clientOrder map[string]string           // clientOrderID → orderID (idempotência)
 	positions   map[string]*domain.Position // por symbol:exchange
 	balances    map[string]domain.Balance   // por ativo
-	fees        map[string]decimal.Decimal  // taxas pagas, por ativo
+	ledger      *ledger.Ledger              // double-entry (fees + PnL)
 	seenTrades  map[string]struct{}         // dedup de fills por Trade.ID
 	replaying   bool                        // true durante Replay (suprime emissão)
 }
@@ -53,7 +55,7 @@ func New(broker exchange.Broker, emit func(event.Event)) *OMS {
 		clientOrder: make(map[string]string),
 		positions:   make(map[string]*domain.Position),
 		balances:    make(map[string]domain.Balance),
-		fees:        make(map[string]decimal.Decimal),
+		ledger:      ledger.New(),
 		seenTrades:  make(map[string]struct{}),
 	}
 }
@@ -147,9 +149,12 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 		o.seenTrades[t.ID] = struct{}{}
 	}
 
-	// Rastreia taxas por ativo (nunca ignorar fee).
+	// Taxa em double-entry: débito na conta de fee (expense), crédito no ativo.
 	if t.Fee.Sign() > 0 {
-		o.fees[t.FeeAsset] = o.fees[t.FeeAsset].Add(t.Fee)
+		o.ledger.Post(
+			ledger.Entry{ID: t.ID + ":fee", Account: ledger.FeeAccount(t.FeeAsset), Debit: t.Fee, Ref: t.ID, Timestamp: t.Timestamp},
+			ledger.Entry{ID: t.ID + ":asset", Account: ledger.AssetAccount(t.FeeAsset), Credit: t.Fee, Ref: t.ID, Timestamp: t.Timestamp},
+		)
 	}
 
 	key := posKey(t.Symbol, t.Exchange)
@@ -227,15 +232,20 @@ func (o *OMS) Balances() []domain.Balance {
 	return out
 }
 
-// Fees devolve o total de taxas pagas por ativo.
+// Fees devolve o total de taxas pagas por ativo (derivado do ledger).
 func (o *OMS) Fees() map[string]decimal.Decimal {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	out := make(map[string]decimal.Decimal, len(o.fees))
-	for a, f := range o.fees {
-		out[a] = f
+	out := make(map[string]decimal.Decimal)
+	for account, bal := range o.ledger.Balances() {
+		if strings.HasPrefix(account, ledger.FeePrefix) {
+			out[strings.TrimPrefix(account, ledger.FeePrefix)] = bal
+		}
 	}
 	return out
+}
+
+// Ledger devolve o livro-razão double-entry do OMS.
+func (o *OMS) Ledger() *ledger.Ledger {
+	return o.ledger
 }
 
 // emitEvent emite um evento, suprimindo a emissão durante o Replay (os eventos
