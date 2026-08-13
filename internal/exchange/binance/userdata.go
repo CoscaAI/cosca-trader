@@ -6,6 +6,7 @@ package binance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -105,7 +106,9 @@ func (c *Client) runUserStream(ctx context.Context, h exchange.Handler) error {
 
 	conn, _, err := websocket.Dial(ctx, c.url+"/"+listenKey, nil)
 	if err != nil {
-		return fmt.Errorf("user stream dial: %w", err)
+		// Nunca propagar o erro bruto: ele pode conter a URL com o listenKey
+		// (token de sessão do user stream privado). Redigir por segurança.
+		return errors.New("user stream dial failed")
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 

@@ -72,18 +72,43 @@ func main() {
 		tc := binance.NewTrading(apiKey, apiSecret, *testnet)
 		omsEngine = oms.New(tc, e.Emit)
 
+		// Resiliência (event sourcing): reconstrói o estado a partir do rastro.
+		if db != nil {
+			if events, err := db.AllEvents(); err != nil {
+				log.Printf("⚠ não carregou o rastro para replay: %v", err)
+			} else {
+				omsEngine.Replay(events)
+				log.Printf("COSCA TRADER — replay: %d eventos reaplicados", len(events))
+			}
+		}
+
+		// Reconciliação inicial com a exchange (saldos + ordens abertas).
+		if err := omsEngine.Reconcile(ctx); err != nil {
+			log.Printf("⚠ reconciliação inicial: %v", err)
+		}
+
 		go func() {
 			if err := tc.StartUserStream(ctx, exchange.Handler{
 				OnOrderUpdate:   omsEngine.ApplyOrderUpdate,
 				OnTrade:         omsEngine.ApplyTrade,
 				OnBalanceUpdate: omsEngine.ApplyBalance,
 				OnStatus: func(s exchange.Status) {
-					e.Emit(event.Event{
-						Type:     event.ExchangeConnected,
-						Source:   "exchange:binance",
-						Severity: event.SeverityInfo,
-						Payload:  s,
-					})
+					t, sev := event.ExchangeConnected, event.SeverityInfo
+					switch s.State {
+					case "disconnected":
+						t, sev = event.ExchangeDisconnected, event.SeverityWarning
+					case "error":
+						t, sev = event.ExchangeError, event.SeverityError
+					}
+					e.Emit(event.Event{Type: t, Source: "exchange:binance", Severity: sev, Payload: s})
+					// Reconcilia ao reconectar (a Binance não faz replay do stream).
+					if s.State == "connected" {
+						go func() {
+							if err := omsEngine.Reconcile(ctx); err != nil {
+								log.Printf("⚠ reconciliação pós-reconexão: %v", err)
+							}
+						}()
+					}
 				},
 			}); err != nil {
 				log.Printf("⚠ user stream encerrado: %v", err)

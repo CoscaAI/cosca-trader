@@ -37,7 +37,8 @@ func (c *Client) signedRequest(ctx context.Context, method, path string, params 
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		// Não incluir a URL (que carrega a signature) na mensagem de erro.
+		return fmt.Errorf("binance: requisição %s %s falhou", method, path)
 	}
 	defer resp.Body.Close()
 

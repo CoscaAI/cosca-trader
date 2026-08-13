@@ -12,6 +12,7 @@ package oms
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 
@@ -40,6 +41,7 @@ type OMS struct {
 	balances    map[string]domain.Balance   // por ativo
 	fees        map[string]decimal.Decimal  // taxas pagas, por ativo
 	seenTrades  map[string]struct{}         // dedup de fills por Trade.ID
+	replaying   bool                        // true durante Replay (suprime emissão)
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit.
@@ -86,7 +88,7 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 	}
 	o.mu.Unlock()
 
-	o.emit(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
+	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
 	return &ord, nil
 }
 
@@ -95,7 +97,7 @@ func (o *OMS) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	if err := o.broker.CancelOrder(ctx, symbol, orderID); err != nil {
 		return err
 	}
-	o.emit(event.Event{
+	o.emitEvent(event.Event{
 		Type:    event.OrderCanceled,
 		Source:  "oms",
 		Payload: map[string]any{"symbol": symbol, "order_id": orderID},
@@ -128,7 +130,7 @@ func (o *OMS) ApplyOrderUpdate(ord domain.Order) {
 		t = event.OrderRejected
 		sev = event.SeverityWarning
 	}
-	o.emit(event.Event{Type: t, Source: "oms", Severity: sev, Payload: ord})
+	o.emitEvent(event.Event{Type: t, Source: "oms", Severity: sev, Payload: ord})
 }
 
 // ApplyTrade consolida um fill (idempotente por Trade.ID): rastreia fee,
@@ -160,14 +162,14 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 	o.mu.Unlock()
 
 	// Emite DEPOIS de mutar (persist-before-publish + estado consistente).
-	o.emit(event.Event{Type: event.TradeExecuted, Source: "oms", Payload: t})
+	o.emitEvent(event.Event{Type: event.TradeExecuted, Source: "oms", Payload: t})
 	switch {
 	case closed:
-		o.emit(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos})
+		o.emitEvent(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos})
 	case opened:
-		o.emit(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos})
+		o.emitEvent(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos})
 	default:
-		o.emit(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos})
+		o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos})
 	}
 }
 
@@ -176,7 +178,7 @@ func (o *OMS) ApplyBalance(b domain.Balance) {
 	o.mu.Lock()
 	o.balances[b.Asset] = b
 	o.mu.Unlock()
-	o.emit(event.Event{Type: event.BalanceUpdated, Source: "oms", Payload: b})
+	o.emitEvent(event.Event{Type: event.BalanceUpdated, Source: "oms", Payload: b})
 }
 
 // Orders devolve uma cópia das ordens conhecidas.
@@ -234,6 +236,107 @@ func (o *OMS) Fees() map[string]decimal.Decimal {
 		out[a] = f
 	}
 	return out
+}
+
+// emitEvent emite um evento, suprimindo a emissão durante o Replay (os eventos
+// já estão no rastro — reemitir duplicaria).
+func (o *OMS) emitEvent(ev event.Event) {
+	if o.replaying {
+		return
+	}
+	o.emit(ev)
+}
+
+// Replay reconstrói o estado do OMS a partir do rastro persistido. Deve ser
+// chamado ANTES de o OMS começar a receber eventos ao vivo (startup).
+func (o *OMS) Replay(events []event.Event) {
+	o.replaying = true
+	defer func() { o.replaying = false }()
+
+	for _, ev := range events {
+		switch ev.Type {
+		case event.OrderCreated, event.OrderSubmitted, event.OrderFilled,
+			event.OrderPartiallyFilled, event.OrderCanceled, event.OrderRejected:
+			var ord domain.Order
+			if decodePayload(ev.Payload, &ord) {
+				o.ApplyOrderUpdate(ord)
+			}
+		case event.TradeExecuted:
+			var t domain.Trade
+			if decodePayload(ev.Payload, &t) {
+				o.ApplyTrade(t)
+			}
+		case event.BalanceUpdated:
+			var b domain.Balance
+			if decodePayload(ev.Payload, &b) {
+				o.ApplyBalance(b)
+			}
+		}
+	}
+}
+
+// Reconcile sincroniza o estado com a exchange via REST (Balances + OpenOrders
+// dos símbolos conhecidos). Usado no startup e na reconexão do user stream.
+func (o *OMS) Reconcile(ctx context.Context) error {
+	if o.broker == nil {
+		return nil
+	}
+	balances, err := o.broker.Balances(ctx)
+	if err != nil {
+		return err
+	}
+	for _, b := range balances {
+		o.ApplyBalance(b)
+	}
+	for _, s := range o.symbols() {
+		orders, err := o.broker.OpenOrders(ctx, s)
+		if err != nil {
+			continue
+		}
+		for _, ord := range orders {
+			o.ApplyOrderUpdate(ord)
+		}
+	}
+	return nil
+}
+
+// symbols devolve os símbolos distintos que o OMS conhece.
+func (o *OMS) symbols() []string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	set := make(map[string]struct{})
+	for _, ord := range o.orders {
+		set[ord.Symbol] = struct{}{}
+	}
+	for _, p := range o.positions {
+		set[p.Symbol] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	return out
+}
+
+// decodePayload decodifica um payload (struct em memória ou json.RawMessage do
+// disco) para o tipo alvo.
+func decodePayload(payload any, target any) bool {
+	var data []byte
+	var err error
+	switch p := payload.(type) {
+	case json.RawMessage:
+		data = p
+	case []byte:
+		data = p
+	case nil:
+		return false
+	default:
+		data, err = json.Marshal(payload)
+		if err != nil {
+			return false
+		}
+	}
+	return json.Unmarshal(data, target) == nil
 }
 
 // posKey identifica uma posição por símbolo + exchange.
