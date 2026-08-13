@@ -4,7 +4,7 @@
 // timeline, SSE). O cliente desktop (Wails) e o futuro cliente web são visões
 // sobre este mesmo motor — nenhuma lógica crítica vive na UI.
 //
-// F0 — Fundação: event bus, event store, schema de domínio, rastro total.
+// F0 — Fundação · F1 — Binance market data · F2 — OMS (execução autenticada).
 package main
 
 import (
@@ -16,8 +16,10 @@ import (
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
+	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/exchange/binance"
 	"github.com/CoscaAI/cosca-trader/internal/market"
+	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
@@ -27,9 +29,9 @@ func main() {
 	binanceFlag := flag.Bool("binance", false, "conectar à Binance (market data em tempo real)")
 	symbol := flag.String("symbol", "BTCUSDT", "símbolo para market data")
 	interval := flag.String("interval", "1m", "intervalo dos candles")
+	testnet := flag.Bool("testnet", false, "usar a sandbox da Binance (sem fundos reais)")
 	flag.Parse()
 
-	// SQLite (nil se não conseguir abrir — o core roda mesmo sem disco).
 	db, err := store.Open(*dbPath)
 	if err != nil {
 		log.Printf("⚠ aviso: sem persistência SQLite (%v) — rodando em memória", err)
@@ -37,6 +39,7 @@ func main() {
 	}
 
 	e := engine.New(db)
+	ctx := context.Background()
 
 	// Rastreamento total: a partir daqui, TODO evento passa pelo Emit.
 	e.Emit(event.Event{
@@ -46,9 +49,8 @@ func main() {
 		Payload:  map[string]any{"db": *dbPath, "port": *port},
 	})
 
-	// F1 — conectividade Binance: market data em tempo real → eventos.
+	// F1 — market data público (Binance).
 	if *binanceFlag {
-		ctx := context.Background()
 		bc := binance.New()
 		md := market.New(bc, e.Emit)
 		if err := md.Watch(*symbol, *interval); err != nil {
@@ -62,7 +64,37 @@ func main() {
 		log.Printf("COSCA TRADER — Binance conectando: %s@%s", *symbol, *interval)
 	}
 
-	serve(e, *port)
+	// F2 — execução autenticada (ordens/conta) se houver credenciais.
+	var omsEngine *oms.OMS
+	apiKey := os.Getenv("BINANCE_API_KEY")
+	apiSecret := os.Getenv("BINANCE_API_SECRET")
+	if apiKey != "" && apiSecret != "" {
+		tc := binance.NewTrading(apiKey, apiSecret, *testnet)
+		omsEngine = oms.New(tc, e.Emit)
+
+		go func() {
+			if err := tc.StartUserStream(ctx, exchange.Handler{
+				OnOrderUpdate:   omsEngine.ApplyOrderUpdate,
+				OnTrade:         omsEngine.ApplyTrade,
+				OnBalanceUpdate: omsEngine.ApplyBalance,
+				OnStatus: func(s exchange.Status) {
+					e.Emit(event.Event{
+						Type:     event.ExchangeConnected,
+						Source:   "exchange:binance",
+						Severity: event.SeverityInfo,
+						Payload:  s,
+					})
+				},
+			}); err != nil {
+				log.Printf("⚠ user stream encerrado: %v", err)
+			}
+		}()
+		log.Printf("COSCA TRADER — execução autenticada ativa (testnet=%v)", *testnet)
+	} else {
+		log.Printf("COSCA TRADER — modo observação (sem credenciais; defina BINANCE_API_KEY/BINANCE_API_SECRET para executar)")
+	}
+
+	serve(e, omsEngine, *port)
 }
 
 func defaultPort() string {

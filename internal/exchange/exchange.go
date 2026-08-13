@@ -19,11 +19,15 @@ type Status struct {
 	Message  string `json:"message,omitempty"`
 }
 
-// Handler recebe dados de mercado normalizados de uma exchange.
+// Handler recebe dados normalizados de uma exchange (mercado + conta).
 type Handler struct {
 	OnTick   func(domain.Tick)
 	OnCandle func(domain.Candle)
 	OnStatus func(Status)
+	// F2 — conta/execução (user data stream)
+	OnOrderUpdate   func(domain.Order)
+	OnTrade         func(domain.Trade)
+	OnBalanceUpdate func(domain.Balance)
 }
 
 // Exchange é a abstração de uma corretora. As implementações lidam com o
@@ -44,4 +48,33 @@ type Exchange interface {
 
 	// Close encerra a conexão.
 	Close() error
+}
+
+// OrderRequest é a ordem a ser enviada à exchange (payload de execução).
+type OrderRequest struct {
+	Symbol        string
+	Side          domain.Side
+	Type          domain.OrderType
+	Quantity      float64
+	Price         float64
+	StopPrice     float64
+	TimeInForce   domain.TimeInForce
+	ClientOrderID string
+}
+
+// Broker é a interface de execução autenticada (ordens + conta). Separada da
+// Exchange (market data) porque exige credenciais e opera sobre a conta do
+// usuário — riscos diferentes, contratos diferentes.
+type Broker interface {
+	// PlaceOrder envia uma ordem e devolve o estado confirmado pela exchange.
+	PlaceOrder(ctx context.Context, req OrderRequest) (domain.Order, error)
+	// CancelOrder cancela uma ordem ativa.
+	CancelOrder(ctx context.Context, symbol, orderID string) error
+	// Balances devolve os saldos da conta.
+	Balances(ctx context.Context) ([]domain.Balance, error)
+	// OpenOrders devolve as ordens ativas de um símbolo.
+	OpenOrders(ctx context.Context, symbol string) ([]domain.Order, error)
+	// StartUserStream abre o stream de eventos da conta (ordens, fills, saldo)
+	// até o contexto ser cancelado.
+	StartUserStream(ctx context.Context, h Handler) error
 }

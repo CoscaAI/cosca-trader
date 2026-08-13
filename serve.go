@@ -1,5 +1,4 @@
-// serve.go — API de observabilidade do core (health, timeline, SSE). O cliente
-// desktop (Wails) e o web consomem estes mesmos contratos.
+// serve.go — API do core (health, timeline, SSE, ordens, posições, saldos).
 package main
 
 import (
@@ -9,9 +8,11 @@ import (
 	"net/http"
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
+	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/oms"
 )
 
-func serve(e *engine.Engine, port string) {
+func serve(e *engine.Engine, o *oms.OMS, port string) {
 	mux := http.NewServeMux()
 
 	// /health — estado do core.
@@ -25,6 +26,7 @@ func serve(e *engine.Engine, port string) {
 			"first_event": first,
 			"last_event":  last,
 			"subscribers": e.Hub.SubscriberCount(),
+			"trading":     o != nil,
 		})
 	})
 
@@ -61,6 +63,50 @@ func serve(e *engine.Engine, port string) {
 				return
 			}
 		}
+	})
+
+	// /orders — GET lista ordens · POST envia uma ordem.
+	mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+		if o == nil {
+			http.Error(w, "execução não configurada (defina BINANCE_API_KEY/BINANCE_API_SECRET)", http.StatusServiceUnavailable)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, o.Orders())
+		case http.MethodPost:
+			var req exchange.OrderRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "JSON inválido", http.StatusBadRequest)
+				return
+			}
+			ord, err := o.PlaceOrder(r.Context(), req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			writeJSON(w, ord)
+		default:
+			http.Error(w, "método não suportado", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// /positions — posições abertas.
+	mux.HandleFunc("/positions", func(w http.ResponseWriter, r *http.Request) {
+		if o == nil {
+			writeJSON(w, []any{})
+			return
+		}
+		writeJSON(w, o.Positions())
+	})
+
+	// /balances — saldos.
+	mux.HandleFunc("/balances", func(w http.ResponseWriter, r *http.Request) {
+		if o == nil {
+			writeJSON(w, []any{})
+			return
+		}
+		writeJSON(w, o.Balances())
 	})
 
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s", port)

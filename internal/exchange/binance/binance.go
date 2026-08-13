@@ -19,19 +19,40 @@ import (
 
 const defaultWSURL = "wss://stream.binance.com:9443/ws"
 
-// Client é o adapter Binance.
+// Client é o adapter Binance (market data + execução autenticada).
 type Client struct {
-	name string
-	url  string
+	name     string
+	url      string
+	restBase string
+	apiKey   string
+	secret   string
 
 	mu   sync.Mutex
 	conn *websocket.Conn
 	subs []string
 }
 
-// New cria o adapter com a URL padrão de market data público.
+// New cria o adapter de market data (sem credenciais — só streams públicos).
 func New() *Client {
-	return &Client{name: "binance", url: defaultWSURL}
+	return &Client{name: "binance", url: defaultWSURL, restBase: "https://api.binance.com"}
+}
+
+// NewTrading cria o adapter com credenciais para execução (ordens/conta).
+// testnet=true aponta para a sandbox (https://testnet.binance.vision).
+func NewTrading(apiKey, secret string, testnet bool) *Client {
+	c := New()
+	c.apiKey = apiKey
+	c.secret = secret
+	if testnet {
+		c.url = "wss://testnet.binance.vision/ws"
+		c.restBase = "https://testnet.binance.vision"
+	}
+	return c
+}
+
+// TradingEnabled devolve se as credenciais de execução estão configuradas.
+func (c *Client) TradingEnabled() bool {
+	return c.apiKey != "" && c.secret != ""
 }
 
 // Name devolve "binance".

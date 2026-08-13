@@ -24,7 +24,7 @@ CORE (Go) — headless, event-driven
 
 - **F0** — Fundação: event bus, event store, schema de domínio, rastro total. ✅
 - **F1** — Conectividade Binance + market data em tempo real (WebSocket). ✅
-- **F2** — OMS: ordens, fills, posições, saldos, book de ofertas.
+- **F2** — OMS: ordens, fills, posições, saldos, book de ofertas. ✅
 - **F3** — Gráficos + indicadores (plugins).
 - **F4** — Risco (sizing, stop/target, drawdown) + opções.
 - **F5** — Estratégias + backtest + paper trading.
@@ -42,6 +42,7 @@ internal/
   engine/   Composição raiz (Emit = persistir + publicar)
   exchange/ Abstração de corretoras (Provider Engine) + adapter Binance
   market/   Market Data Engine (exchange → eventos de mercado)
+  oms/      Order Management System (ordens, posições, saldos, PnL)
 frontend/   React + Vite + TypeScript (desktop Wails)
 ```
 
@@ -53,6 +54,16 @@ go run . --db .cosca/trader.db
 
 # core + market data real da Binance
 go run . --binance --symbol BTCUSDT --interval 1m
+
+# execução autenticada (ordens/conta) — testnet:
+BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance --testnet
+
+# endpoints
+curl http://127.0.0.1:14126/health
+curl http://127.0.0.1:14126/positions
+curl http://127.0.0.1:14126/balances
+curl -X POST http://127.0.0.1:14126/orders \
+  -d '{"symbol":"BTCUSDT","side":"buy","type":"limit","quantity":1,"price":50000}'
 
 # health
 curl http://127.0.0.1:14126/health
