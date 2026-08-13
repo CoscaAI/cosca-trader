@@ -23,7 +23,7 @@ CORE (Go) — headless, event-driven
 ## Fases
 
 - **F0** — Fundação: event bus, event store, schema de domínio, rastro total. ✅
-- **F1** — Conectividade Binance + market data em tempo real (WebSocket).
+- **F1** — Conectividade Binance + market data em tempo real (WebSocket). ✅
 - **F2** — OMS: ordens, fills, posições, saldos, book de ofertas.
 - **F3** — Gráficos + indicadores (plugins).
 - **F4** — Risco (sizing, stop/target, drawdown) + opções.
@@ -40,6 +40,8 @@ internal/
   store/    Event Store append-only + SQLite (persistência/rastro)
   stream/   Pub/sub em tempo real (SSE/WS)
   engine/   Composição raiz (Emit = persistir + publicar)
+  exchange/ Abstração de corretoras (Provider Engine) + adapter Binance
+  market/   Market Data Engine (exchange → eventos de mercado)
 frontend/   React + Vite + TypeScript (desktop Wails)
 ```
 
@@ -48,6 +50,9 @@ frontend/   React + Vite + TypeScript (desktop Wails)
 ```bash
 # core headless (porta 14126)
 go run . --db .cosca/trader.db
+
+# core + market data real da Binance
+go run . --binance --symbol BTCUSDT --interval 1m
 
 # health
 curl http://127.0.0.1:14126/health

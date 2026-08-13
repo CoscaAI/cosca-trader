@@ -2,7 +2,10 @@ module github.com/CoscaAI/cosca-trader
 
 go 1.25.4
 
-require modernc.org/sqlite v1.38.0
+require (
+	modernc.org/sqlite v1.38.0
+	nhooyr.io/websocket v1.8.17
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

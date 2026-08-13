@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"os"
@@ -15,12 +16,17 @@ import (
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
+	"github.com/CoscaAI/cosca-trader/internal/exchange/binance"
+	"github.com/CoscaAI/cosca-trader/internal/market"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
 func main() {
 	dbPath := flag.String("db", defaultDBPath(), "caminho do banco SQLite")
 	port := flag.String("port", defaultPort(), "porta HTTP do core")
+	binanceFlag := flag.Bool("binance", false, "conectar à Binance (market data em tempo real)")
+	symbol := flag.String("symbol", "BTCUSDT", "símbolo para market data")
+	interval := flag.String("interval", "1m", "intervalo dos candles")
 	flag.Parse()
 
 	// SQLite (nil se não conseguir abrir — o core roda mesmo sem disco).
@@ -39,6 +45,22 @@ func main() {
 		Severity: event.SeverityInfo,
 		Payload:  map[string]any{"db": *dbPath, "port": *port},
 	})
+
+	// F1 — conectividade Binance: market data em tempo real → eventos.
+	if *binanceFlag {
+		ctx := context.Background()
+		bc := binance.New()
+		md := market.New(bc, e.Emit)
+		if err := md.Watch(*symbol, *interval); err != nil {
+			log.Printf("⚠ subscribe market data: %v", err)
+		}
+		go func() {
+			if err := md.Start(ctx); err != nil {
+				log.Printf("⚠ market data encerrado: %v", err)
+			}
+		}()
+		log.Printf("COSCA TRADER — Binance conectando: %s@%s", *symbol, *interval)
+	}
 
 	serve(e, *port)
 }
