@@ -168,12 +168,13 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 
 	// Emite DEPOIS de mutar (persist-before-publish + estado consistente).
 	o.emitEvent(event.Event{Type: event.TradeExecuted, Source: "oms", Payload: t})
-	switch {
-	case closed:
+	if closed {
 		o.emitEvent(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos})
-	case opened:
+	}
+	if opened {
 		o.emitEvent(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos})
-	default:
+	}
+	if !opened && !closed {
 		o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos})
 	}
 }
@@ -441,13 +442,14 @@ func applyFill(pos *domain.Position, t domain.Trade) (opened, closed bool) {
 	pos.UpdatedAt = t.Timestamp
 
 	if t.Quantity.GreaterThan(closeQty) {
-		// Flip: o excesso abre a posição no lado oposto.
+		// Flip: o excesso abre a posição no lado oposto. O lado anterior foi
+		// fechado (PnL realizado) E um novo foi aberto — sinaliza ambos.
 		excess := t.Quantity.Sub(closeQty)
 		pos.Side = t.Side
 		pos.Quantity = excess
 		pos.AvgEntryPrice = t.Price
 		pos.OpenedAt = t.Timestamp
-		return true, false
+		return true, true
 	}
 	if pos.Quantity.IsZero() {
 		return false, true

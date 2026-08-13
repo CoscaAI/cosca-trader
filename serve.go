@@ -92,6 +92,22 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 				return
 			}
 			writeJSON(w, ord)
+		case http.MethodDelete:
+			if !authorized(r) {
+				http.Error(w, "não autorizado", http.StatusUnauthorized)
+				return
+			}
+			symbol := r.URL.Query().Get("symbol")
+			orderID := r.URL.Query().Get("order_id")
+			if symbol == "" || orderID == "" {
+				http.Error(w, "symbol e order_id obrigatórios", http.StatusBadRequest)
+				return
+			}
+			if err := o.CancelOrder(r.Context(), symbol, orderID); err != nil {
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "order_id": orderID})
 		default:
 			http.Error(w, "método não suportado", http.StatusMethodNotAllowed)
 		}

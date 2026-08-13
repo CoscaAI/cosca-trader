@@ -26,6 +26,7 @@ func (c *Client) signedRequest(ctx context.Context, method, path string, params 
 		return fmt.Errorf("binance: credenciais ausentes (use NewTrading)")
 	}
 	params.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	params.Set("recvWindow", "10000") // janela de 10s: tolera leve deriva de relógio
 	qs := sign(params, c.secret)
 
 	u := c.restBase + path + "?" + qs

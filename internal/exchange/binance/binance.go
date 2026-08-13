@@ -147,7 +147,9 @@ func (c *Client) subscribe(stream string) error {
 	if conn == nil {
 		return nil // ainda não conectado — será enviado na conexão/reconexão
 	}
-	return c.write(context.Background(), subscribeMsg(stream))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return c.write(ctx, subscribeMsg(stream))
 }
 
 func (c *Client) write(ctx context.Context, msg any) error {
