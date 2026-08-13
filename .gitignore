@@ -1,0 +1,27 @@
+# Binários
+/bin/
+*.exe
+*.test
+*.out
+
+# Dados de runtime
+.cosca/
+*.db
+*.db-wal
+*.db-shm
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Wails
+frontend/wailsjs/
+
+# Segredos
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
