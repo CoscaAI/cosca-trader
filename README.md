@@ -537,3 +537,40 @@ REGIME: risk-on — ✅ RISK-ON: mercados globais favoráveis
 
 A proteção macro é automática: o Don vê o radar e o sistema se ajusta sozinho
 quando o mundo vira contra o risco.
+
+## Monitor de divergência macro — seguir a tendência global (a missão do Don)
+
+O Don pediu: *"gap de preco muito grande em ativo que vai influenciar no que
+estamos operando, por exemplo sp500 caiu bastante e bitcoin ainda nao reagio —
+entrar na melhor forma possivel seguindo a tendencia de queda e vice-versa,
+fica monitorando tudo"*.
+
+O `--macro` monitora o radar global + o cripto em loop e detecta a
+**divergência macro**: quando o S&P move forte e o BTC não reagiu, há uma
+janela de oportunidade — o cripto tende a seguir o movimento global com lag.
+
+```bash
+go run . --macro --symbol BTCUSDT --fetch-interval 1d --fetch-bars 10
+```
+
+```
+📡 risk-on | S&P 10d +2.40% | BTCUSDT 10d -2.71% | gap +5.11 | força 1.00
+🟢 SINAL: S&P subiu 2.40% mas cripto só -2.71% — gap de 5.11 → seguir a alta
+```
+
+### A lógica (marketindex.AnalyzeDivergence)
+
+- **Gap** = movimento global (S&P 10d) − movimento cripto (BTC 10d).
+- **Gap > mínimo** (2%) → seguir a ALTA (o cripto vai alcançar o mundo).
+- **Gap < −mínimo** → seguir a QUEDA (o cripto vai sofrer a correção).
+- **Força** = magnitude do gap × confiança (risk-off reforça seguir queda,
+  risk-on reforça seguir alta).
+- Sem movimento global relevante ou sem dados → **hold** (não opera).
+
+### Proteções (o que o Don pediu)
+
+1. **Rate limit**: 1 leitura externa a cada 10 min (não estoura Yahoo/Binance).
+2. **Dados insuficientes**: snapshot incompleto (sem S&P/VIX) ou velho
+   (> 15min) → NÃO sinaliza. O sistema prefere não operar a operar às cegas.
+3. O regime alimenta o risk manager: em risk-off, a exposição cai pela metade
+   (a proteção da L287 continua valendo em cima da divergência).

@@ -57,7 +57,8 @@ func main() {
 	scanFlag := flag.Bool("scan", false, "Fase 5: SCANNER — avalia TODAS as estratégias com dados reais e ranqueia por score científico")
 	scanSymbols := flag.String("scan-symbols", "BTCUSDT", "símbolos do scanner separados por vírgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)")
 	scanIntervals := flag.String("scan-intervals", "1h", "intervalos do scanner separados por vírgula (ex: 1h,4h,1d)")
-	marketsFlag := flag.Bool("markets", false, "proteção macro: monitora os mercados GLOBAIS (S&P 500, NASDAQ, VIX, ouro, dólar) e mostra o regime risk-on/risk-off")
+		marketsFlag := flag.Bool("markets", false, "proteção macro: monitora os mercados GLOBAIS (S&P 500, NASDAQ, VIX, ouro, dólar) e mostra o regime risk-on/risk-off")
+	macroFlag := flag.Bool("macro", false, "MONITOR CONTÍNUO de divergência macro: radar global + cripto, detecta S&P caiu/BTC não reagiu e sinaliza entrada seguindo a tendência — com rate limit e proteção por falta de dados")
 	shadowFlag := flag.Bool("shadow", false, "Fase 5: MODO LABORATÓRIO VIVO — observa o mercado REAL (sem chave, sem dinheiro), registra previsões da estratégia, mede CONVERGÊNCIA com a realidade e reajusta sozinho quando o regime muda")
 	shadowStrategy := flag.String("shadow-strategy", "ema-cross", "estratégia no modo shadow")
 	shadowDemo := flag.Bool("shadow-demo", false, "modo shadow com candles sintéticos ACELERADOS (velas de 5s) — para o Don VER o laboratório vivo funcionando em minutos, sem esperar o mercado real")
@@ -155,6 +156,14 @@ func main() {
 	// o que acontece lá fora — S&P, NASDAQ, VIX, ouro, dólar.
 	if *marketsFlag {
 		runMarkets()
+		return
+	}
+
+	// Monitor contínuo de divergência macro: observa o radar global + o cripto,
+	// detecta o lag (S&P caiu, BTC não reagiu) e sinaliza entrada na direção
+	// da tendência global — com rate limit e proteção por falta de dados.
+	if *macroFlag {
+		runMacroMonitor(*symbol, *fetchInterval, *fetchBars)
 		return
 	}
 
@@ -697,6 +706,77 @@ func runMarkets() {
 		log.Printf("  %-18s %10.2f  5d:%+5.2f%%  10d:%+5.2f%%", q.Name, q.Price, q.Change5d, q.Change10d)
 	}
 	log.Printf("REGIME: %s — %s", snap.Regime, snap.Signal)
+}
+
+// runMacroMonitor é o MONITOR CONTÍNUO da missão do Don: observa o radar
+// global + o cripto em loop, detecta a divergência (S&P caiu forte, BTC ainda
+// não reagiu) e sinaliza a entrada na direção da tendência global. Protegido
+// por rate limit (não estoura a API) e por falta de dados (sem dados
+// suficientes → NÃO sinaliza).
+func runMacroMonitor(symbol, interval string, bars int) {
+	radar := marketindex.New()
+	bc := binance.New()
+	// Rate limit: 1 chamada externa a cada 10 min (Yahoo + Binance) — o Don
+	// pediu proteção contra rate limit; dados frescos de 15min são aceitáveis
+	// para a leitura macro (o regime não muda em minutos).
+	rl := marketindex.NewRateLimiter(10*time.Minute, 15*time.Minute)
+
+	log.Printf("═══ MONITOR MACRO ativo ═══ símbolo=%s | radar global (S&P/NASDAQ/VIX/ouro/dólar) + divergência | rate limit: 1 leitura/10min | sem dados suficientes → não sinaliza", symbol)
+
+	for {
+		// Rate limit: só consulta quando permitido.
+		if !rl.Allow() {
+			next := rl.NextAllowed()
+			wait := time.Until(next)
+			log.Printf("⏳ rate limit: próxima leitura em %s", wait.Round(time.Second))
+			time.Sleep(wait)
+			continue
+		}
+
+		// 1. Radar global (com cache interno).
+		snap, err := radar.Fetch(context.Background())
+		if err != nil {
+			log.Printf("⚠ radar indisponível (%v) — NÃO sinalizando (proteção por falta de dados)", err)
+			time.Sleep(2 * time.Minute)
+			continue
+		}
+
+		// 2. Proteção por falta de dados: snapshot incompleto/velho → não opera.
+		if !marketindex.IsDataEnough(snap, rl) {
+			log.Printf("⚠ dados insuficientes do radar — NÃO sinalizando (proteção por falta de dados)")
+			time.Sleep(2 * time.Minute)
+			continue
+		}
+
+		// 3. Variação do cripto (BTC) na mesma janela (10d) via Klines público.
+		candles, err := bc.Klines(context.Background(), symbol, interval, bars, min(bars, 1000))
+		if err != nil || len(candles) < 2 {
+			log.Printf("⚠ dados do %s indisponíveis — NÃO sinalizando (proteção por falta de dados)", symbol)
+			time.Sleep(2 * time.Minute)
+			continue
+		}
+		btcChg := (candles[len(candles)-1].Close - candles[0].Close) / candles[0].Close * 100
+
+		// 4. Divergência → sinal de entrada.
+		sig := marketindex.AnalyzeDivergence(snap, btcChg, marketindex.DefaultDivergenceConfig())
+		log.Printf("📡 %s | S&P 10d %+.2f%% | %s 10d %+.2f%% | gap %+.2f | força %.2f",
+			snap.Regime, sig.GlobalChangePct, symbol, sig.CryptoChangePct, sig.GlobalChangePct-sig.CryptoChangePct, sig.Strength)
+		switch sig.Action {
+		case "buy":
+			log.Printf("🟢 SINAL: %s (força %.2f)", sig.Reason, sig.Strength)
+		case "sell":
+			log.Printf("🔴 SINAL: %s (força %.2f)", sig.Reason, sig.Strength)
+		default:
+			log.Printf("   %s", sig.Reason)
+		}
+
+		// Aguarda o próximo ciclo respeitando o rate limit.
+		next := rl.NextAllowed()
+		wait := time.Until(next)
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
 }
 
 // runScan puxa dados REAIS da Binance (API pública, sem chave) e roda o
