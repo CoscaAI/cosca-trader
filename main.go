@@ -9,14 +9,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/CoscaAI/cosca-trader/internal/domain"
@@ -28,6 +34,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/store"
+	"github.com/CoscaAI/cosca-trader/internal/strategy"
 )
 
 func main() {
@@ -40,12 +47,28 @@ func main() {
 	authFlag := flag.Bool("auth", false, "exigir COSCA_TRADER_TOKEN no startup (fail-fast)")
 	liveFlag := flag.Bool("live", false, "MODO PRODUÇÃO: conecta à Binance real (api.binance.com) — DINHEIRO REAL; exige COSCA_TRADER_TOKEN")
 	paperFlag := flag.Bool("paper", false, "MODO PAPER (Fase 2B): broker simulado com fills em memória — sem chaves, sem dinheiro real; use --binance para market data real ou rode offline com candles sintéticos")
+	strategyFlag := flag.String("strategy", "", "estratégia automática no modo paper (Fase 3D): 'ema-cross' (default: desligado)")
+	backtestFlag := flag.Bool("backtest", false, "roda o backtest mínimo da estratégia (Fase 3D, semente do F5) e sai")
 	flag.Parse()
 
 	// Fase 2B: papel é um ambiente exclusivo — nunca coexistir com live/testnet
 	// (o operador escolhe UM lugar para o dinheiro).
 	if *paperFlag && (*liveFlag || *testnet) {
 		log.Fatal("conflito: --paper é exclusivo com --live/--testnet — escolha um único ambiente de execução")
+	}
+
+	// Fase 3D: estratégia selecionada no startup (falha rápido se desconhecida).
+	var strat strategy.Strategy
+	switch *strategyFlag {
+	case "":
+	case "ema-cross":
+		strat = strategy.NewEMACross()
+	default:
+		log.Fatalf("estratégia desconhecida: %q (disponível: ema-cross)", *strategyFlag)
+	}
+	if strat != nil && !*paperFlag {
+		log.Printf("⚠ estratégia %s requer modo paper (--paper) — ignorada", strat.Name())
+		strat = nil
 	}
 
 	// Segurança P0-1: fail-closed. O token é OBRIGATÓRIO nos endpoints
@@ -75,6 +98,14 @@ func main() {
 		Payload:  map[string]any{"db": *dbPath, "port": *port},
 	})
 
+	// Fase 3D — backtest mínimo (CLI only, semente do F5): usa candles do
+	// rastro persistido se houver; senão gera candles sintéticos seedáveis.
+	// Sem broker, sem HTTP — roda e sai.
+	if *backtestFlag {
+		runBacktest(e, *symbol)
+		return
+	}
+
 	// F1 — market data. No modo paper com --binance usamos dados reais (o paper
 	// broker consome o preço corrente para os fills); sem --binance, candles
 	// SINTÉTICOS (random walk seedável via COSCA_TRADER_PAPER_SEED) — o Don vê o
@@ -94,6 +125,12 @@ func main() {
 	} else if *paperFlag {
 		seed := paperSeed()
 		demo := paper.NewDemoFeed(seed, *symbol, demoStartPrice(*symbol))
+		if paperFast() {
+			// Fase 3D: acelera as velas sintéticas para a estratégia sinalizar
+			// em minutos (random walk idêntico — mesmo seed, mesmo preço).
+			demo.FastDemo()
+			log.Printf("COSCA TRADER — demo acelerada (COSCA_TRADER_PAPER_FAST): velas de 5s")
+		}
 		md := market.New(demo, e.Emit)
 		if err := md.Watch(*symbol, *interval); err != nil {
 			log.Printf("⚠ subscribe market data sintético: %v", err)
@@ -215,6 +252,56 @@ func main() {
 		log.Printf("COSCA TRADER — modo observação (sem credenciais; defina BINANCE_API_KEY/BINANCE_API_SECRET para executar)")
 	}
 
+	// Fase 3D — estratégia demonstrativa: CandleClosed → Strategy → sinais →
+	// OMS.PlaceOrder (market, no paper broker). Limite de 1 ordem por sinal por
+	// direção (map lastSide) para não fazer spam. Emite StrategyStarted/Signal;
+	// StrategyStopped sai no desligamento (handler de sinal abaixo).
+	if strat != nil && omsEngine != nil {
+		gate := make(map[string]string) // symbol → última direção enviada
+		var gateMu sync.Mutex
+		ordQty := strategyOrderQty()
+
+		if err := e.Emit(event.Event{
+			Type:    event.StrategyStarted,
+			Source:  "strategy:" + strat.Name(),
+			Payload: map[string]any{"strategy": strat.Name(), "symbol": *symbol, "mode": mode},
+		}); err != nil {
+			log.Printf("⚠ strategy: %v", err)
+		}
+		e.Bus.Subscribe(event.CandleClosed, func(ev event.Event) {
+			c, ok := ev.Payload.(domain.Candle)
+			if !ok {
+				return
+			}
+			for _, sig := range strat.OnCandle(c) {
+				if err := e.Emit(event.Event{Type: event.StrategySignal, Source: "strategy:" + strat.Name(), Payload: sig}); err != nil {
+					log.Printf("⚠ strategy: %v", err)
+				}
+				gateMu.Lock()
+				if gate[sig.Symbol] == sig.Side {
+					gateMu.Unlock()
+					continue // já na direção sinalizada — não repete
+				}
+				gate[sig.Symbol] = sig.Side
+				gateMu.Unlock()
+
+				ord, err := omsEngine.PlaceOrder(context.Background(), exchange.OrderRequest{
+					Symbol:        sig.Symbol,
+					Side:          domain.Side(sig.Side),
+					Type:          domain.OrderMarket,
+					Quantity:      ordQty,
+					ClientOrderID: "strat-" + strat.Name() + "-" + uuid.NewString(),
+				})
+				if err != nil {
+					log.Printf("⚠ strategy %s: ordem %s %s falhou: %v", strat.Name(), sig.Side, sig.Symbol, err)
+					continue
+				}
+				log.Printf("strategy %s: %s %s %s qty=%s (%s)", strat.Name(), sig.Side, sig.Symbol, ord.ID, ordQty, sig.Reason)
+			}
+		})
+		log.Printf("COSCA TRADER — estratégia %s ativa no modo paper (qty=%s por sinal)", strat.Name(), ordQty)
+	}
+
 	// Fase 3A — MarkPrice vivo: os ticks de mercado (reais OU sintéticos)
 	// alimentam o PnL não realizado das posições. Vale para todo modo de
 	// execução (paper com DemoFeed inclui — o tick alimenta o mark igual).
@@ -244,10 +331,107 @@ func main() {
 		}
 	}
 
+	// Desligamento limpo: emite StrategyStopped antes de sair (Ctrl+C / kill).
+	// O serve abaixo bloqueia com log.Fatal; este handler garante o rastro do
+	// término da estratégia no event store.
+	if strat != nil {
+		go func() {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			<-sig
+			if err := e.Emit(event.Event{
+				Type:    event.StrategyStopped,
+				Source:  "strategy:" + strat.Name(),
+				Payload: map[string]any{"strategy": strat.Name()},
+			}); err != nil {
+				log.Printf("⚠ strategy: %v", err)
+			}
+			os.Exit(0)
+		}()
+	}
+
 	serve(e, omsEngine, paperBroker, *port, apiSecurity{
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	}, mode)
+}
+
+// runBacktest roda o backtest mínimo da estratégia ema-cross (Fase 3D, semente
+// do F5) e imprime o resultado. Candles: do rastro persistido (CandleClosed)
+// quando houver; senão sintéticos seedáveis. Sem broker, sem HTTP — CLI only.
+func runBacktest(e *engine.Engine, symbol string) {
+	candles := extractCandles(symbol, e)
+	source := "sintéticos"
+	if len(candles) == 0 {
+		candles = strategy.SyntheticCandles(paperSeed(), symbol, 300, demoStartPrice(symbol))
+	} else {
+		source = "rastro persistido"
+	}
+	res := strategy.Backtest(strategy.NewEMACross(), candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001))
+	log.Printf("backtest ema-cross %s (%d candles, %s): inicial=%s final=%s pnl=%s trades=%d fee=%s",
+		symbol, len(candles), source, res.Initial, res.Final, res.PnL, res.Trades, res.FeePaid)
+}
+
+// extractCandles devolve as velas fechadas persistidas de um símbolo, em ordem
+// cronológica, decodificando o payload dos eventos do rastro durável.
+func extractCandles(symbol string, e *engine.Engine) []domain.Candle {
+	if e.DB == nil {
+		return nil
+	}
+	events, err := e.DB.AllEvents()
+	if err != nil {
+		return nil
+	}
+	var out []domain.Candle
+	for _, ev := range events {
+		if ev.Type != event.CandleClosed {
+			continue
+		}
+		var c domain.Candle
+		if err := payloadJSON(ev.Payload, &c); err != nil || c.Symbol != symbol {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// payloadJSON decodifica um payload (struct em memória ou json.RawMessage do
+// disco) para o tipo alvo.
+func payloadJSON(p any, target any) error {
+	var data []byte
+	var err error
+	switch v := p.(type) {
+	case json.RawMessage:
+		data = v
+	case []byte:
+		data = v
+	case nil:
+		return errors.New("sem payload")
+	default:
+		data, err = json.Marshal(p)
+		if err != nil {
+			return err
+		}
+	}
+	return json.Unmarshal(data, target)
+}
+
+// strategyOrderQty lê a quantidade por sinal da estratégia (Fase 3D). Default:
+// 0.001 do ativo base (ex.: BTC) — pequena o bastante para não estourar o
+// limite de notional com preços altos. COSCA_TRADER_STRATEGY_QTY para ajustar.
+func strategyOrderQty() decimal.Decimal {
+	const def = "0.001"
+	raw := os.Getenv("COSCA_TRADER_STRATEGY_QTY")
+	if raw == "" {
+		return decimal.RequireFromString(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() <= 0 {
+		log.Printf("⚠ COSCA_TRADER_STRATEGY_QTY inválido (%q) — usando %s", raw, def)
+		return decimal.RequireFromString(def)
+	}
+	return v
 }
 
 // maxOrderLimit lê o limite de valor por ordem (P1-1). Default seguro: 1000
@@ -343,6 +527,13 @@ func paperLimitFillFraction() decimal.Decimal {
 		return decimal.RequireFromString(def)
 	}
 	return v
+}
+
+// paperFast lê o toggle de demo acelerada (COSCA_TRADER_PAPER_FAST=1): velas
+// sintéticas de 5s para a estratégia sinalizar em minutos, sem mudar o
+// random walk (determinismo preservado pelo seed).
+func paperFast() bool {
+	return os.Getenv("COSCA_TRADER_PAPER_FAST") == "1"
 }
 
 // paperSeed lê a semente do feed sintético. Vazia = não-determinístico (cada

@@ -26,6 +26,7 @@ type DemoFeed struct {
 	start    float64       // preço inicial
 	vol      float64       // volatilidade por tick
 	rng      *rand.Rand
+	fast     bool // demo acelerada (Fase 3D: velas de 5s p/ a estratégia sinalizar em minutos)
 
 	mu      sync.Mutex
 	handler exchange.Handler
@@ -42,6 +43,18 @@ func NewDemoFeed(seed int64, symbol string, start float64) *DemoFeed {
 		vol:      0.002, // 0.2% por tick (ruído diário plausível)
 		rng:      rand.New(rand.NewSource(seed)),
 	}
+}
+
+// FastDemo acelera a cadência do feed (velas de 5s) para demonstrações da
+// estratégia (Fase 3D): o cruzamento de médias sinaliza em minutos, não em
+// horas. O random walk NÃO muda (mesmo seed = mesma sequência de preços) —
+// apenas o ritmo de entrega.
+func (d *DemoFeed) FastDemo() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.fast = true
+	d.interval = 5 * time.Second
+	d.tickStep = 250 * time.Millisecond
 }
 
 // Name devolve o identificador do feed.
@@ -102,11 +115,14 @@ func (d *DemoFeed) Connect(ctx context.Context, h exchange.Handler) error {
 	}
 }
 
-// SubscribeCandles guarda o intervalo da vela (parse simples).
+// SubscribeCandles guarda o intervalo da vela (parse simples). Na demo
+// acelerada o intervalo curto já foi definido no FastDemo — não sobrescreve.
 func (d *DemoFeed) SubscribeCandles(_ string, interval string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.interval = parseInterval(interval)
+	if !d.fast {
+		d.interval = parseInterval(interval)
+	}
 	return nil
 }
 
