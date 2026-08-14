@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -17,6 +18,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/exchange/binance"
 	"github.com/CoscaAI/cosca-trader/internal/marketindex"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
@@ -251,6 +253,44 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 			"quotes":     snap.Quotes,
 			"fetched_at": snap.FetchedAt,
 			"divergence": sig,
+		})
+	}))
+
+	// /candles — histórico OHLCV para o gráfico do painel. Busca da Binance
+	// (Klines público, sem chave) quando disponível; senão, devolve o que
+	// estiver no rastro persistido. Query: ?symbol=BTCUSDT&interval=1h&bars=200
+	mux.HandleFunc("/candles", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		sym := r.URL.Query().Get("symbol")
+		if sym == "" {
+			sym = "BTCUSDT"
+		}
+		iv := r.URL.Query().Get("interval")
+		if iv == "" {
+			iv = "1h"
+		}
+		bars := 300
+		if b := r.URL.Query().Get("bars"); b != "" {
+			if n, err := strconv.Atoi(b); err == nil && n > 0 && n <= 1000 {
+				bars = n
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		bc := binance.New()
+		candles, err := bc.Klines(ctx, sym, iv, bars, min(bars, 1000))
+		if err != nil || len(candles) == 0 {
+			// Fallback: candles do rastro persistido.
+			candles = extractCandles(sym, e)
+		}
+		if len(candles) == 0 {
+			writeJSON(w, map[string]any{"symbol": sym, "interval": iv, "candles": []any{}})
+			return
+		}
+		writeJSON(w, map[string]any{
+			"symbol":   sym,
+			"interval": iv,
+			"candles":  candles,
+			"source":   "binance",
 		})
 	}))
 

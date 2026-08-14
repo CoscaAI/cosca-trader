@@ -715,6 +715,24 @@ export default function App() {
     }
   }, [client, token]);
 
+  // Histórico do gráfico: carrega UMA vez ao montar / mudar token (não no
+  // polling — a Binance é consultada 1x; o SSE alimenta os candles por cima).
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    (async () => {
+      try {
+        const hist = await client.candles("BTCUSDT", "1h", 300);
+        if (alive && hist.length > 0) setCandles(hist);
+      } catch {
+        /* offline: o gráfico usa só os candles do SSE */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [client, token]);
+
   const refreshRef = useRef(refresh);
   useEffect(() => {
     refreshRef.current = refresh;

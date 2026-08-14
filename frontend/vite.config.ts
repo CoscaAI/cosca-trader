@@ -45,6 +45,7 @@ export default defineConfig({
       "/backtest": coreProxy(),
       "/convergence": coreProxy(),
       "/markets": coreProxy(),
+      "/candles": coreProxy(),
     },
   },
 });

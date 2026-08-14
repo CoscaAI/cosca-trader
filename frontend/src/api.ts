@@ -5,6 +5,7 @@
 import type {
   BacktestReport,
   Balance,
+  CandlePayload,
   ConvergenceState,
   Health,
   MarketsSnapshot,
@@ -59,6 +60,16 @@ export class CoreClient {
 
   async convergence(): Promise<ConvergenceState> {
     return this.get<ConvergenceState>("/convergence");
+  }
+
+  async candles(symbol: string, interval: string, bars: number): Promise<CandlePayload[]> {
+    const r = await fetch(
+      `/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&bars=${bars}`,
+      { headers: this.authHeaders() },
+    );
+    if (!r.ok) throw new Error(`/candles ${r.status}`);
+    const d = (await r.json()) as { candles: CandlePayload[] };
+    return d.candles ?? [];
   }
 
   async backtest(symbol: string): Promise<BacktestReport> {
