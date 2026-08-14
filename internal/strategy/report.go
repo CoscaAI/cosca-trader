@@ -116,8 +116,11 @@ func walkForward(s Strategy, candles []domainCandle, initial, feePct decimal.Dec
 }
 
 // backtestTrades roda a estratégia e devolve os trades FECHADOS com PnL e
-// fees — a matéria-prima de toda a análise estatística. Segue as mesmas
-// regras do Backtest original (long-only all-in), mas registra cada round-trip.
+// fees — a matéria-prima de toda a análise estatística. Opera nos DOIS lados
+// (long E short): "buy" abre long (ou fecha short), "sell" abre short (ou
+// fecha long) — o flip automático acontece quando o sinal é contrário à
+// posição aberta. O campo Stop do sinal é respeitado (execução intra-vela,
+// pessimista, como a casa). Fees aplicadas nos dois lados.
 func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.Decimal) []TradeResult {
 	var out []TradeResult
 	if len(candles) == 0 {
@@ -159,6 +162,23 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 		_ = barIdx
 	}
 
+	// open abre posição na direção pedida (fechando a oposta se houver flip).
+	open := func(side string, price, stop decimal.Decimal) {
+		if position.Sign() > 0 && entrySide != side {
+			// FLIP: fecha a posição atual e abre na direção contrária.
+			finish(price, "flip", idx)
+		}
+		if position.IsZero() {
+			position = equity.Div(price)
+			entry = price
+			entrySide = side
+			fee := price.Mul(position).Mul(feePct)
+			equity = equity.Sub(fee)
+			held = 0
+			activeStop = stop
+		}
+	}
+
 	for _, c := range candles {
 		closePx := decimal.NewFromFloat(c.Close)
 		lowPx := decimal.NewFromFloat(c.Low)
@@ -180,7 +200,8 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 			}
 		}
 
-		// 2. Sinais da estratégia.
+		// 2. Sinais da estratégia — dois lados: buy abre/fecha long,
+		// sell abre/fecha short.
 		for _, sig := range s.OnCandle(c) {
 			price := sig.Price
 			if price.Sign() <= 0 {
@@ -188,19 +209,9 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 			}
 			switch sig.Side {
 			case "buy":
-				if position.IsZero() {
-					position = equity.Div(price)
-					entry = price
-					entrySide = "buy"
-					fee := price.Mul(position).Mul(feePct)
-					equity = equity.Sub(fee)
-					held = 0
-					activeStop = sig.Stop // stop do sinal de entrada
-				}
+				open("buy", price, sig.Stop)
 			case "sell":
-				if position.Sign() > 0 {
-					finish(price, "signal", idx)
-				}
+				open("sell", price, sig.Stop)
 			}
 		}
 		idx++

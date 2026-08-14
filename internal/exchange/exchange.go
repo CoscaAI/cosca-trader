@@ -101,3 +101,22 @@ type OrderRecoverer interface {
 	// Erro = estado ambíguo (não confirmado).
 	OrderByClientOrderID(ctx context.Context, symbol, clientOrderID string) (domain.Order, error)
 }
+
+// InstrumentRules são as regras de negociação de um símbolo (exchangeInfo) —
+// a mesma estrutura que o sizer do risk usa. Declarada aqui para o OMS e o
+// broker compartilharem sem acoplar ao pacote risk.
+type InstrumentRules struct {
+	MinNotional decimal.Decimal // valor mínimo da ordem em quote (ex.: 10 USDT)
+	MinQty      decimal.Decimal // quantidade mínima do ativo base
+	StepSize    decimal.Decimal // incremento da quantidade
+	TickSize    decimal.Decimal // incremento do preço
+}
+
+// InstrumentInfoProvider é uma interface OPCIONAL de brokers que conhecem as
+// regras de negociação dos instrumentos (exchangeInfo). O OMS usa para validar
+// o MÍNIMO da operação (min_notional) além do máximo — o "entrar com o mínimo"
+// que o Don pediu.
+type InstrumentInfoProvider interface {
+	// InstrumentRules devolve as regras do símbolo e se estão disponíveis.
+	InstrumentRules(ctx context.Context, symbol string) (InstrumentRules, bool)
+}

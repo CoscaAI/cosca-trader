@@ -411,3 +411,28 @@ estado (convergindo/divergente), nº de reajustes.
 Falta conhecimento? Buscar no GitHub por estrelas:
 `https://github.com/search?q=($search)&type=repositories&s=stars&o=desc`
 (equivalente programático: `api.github.com/search/repositories?q=...&sort=stars&order=desc`)
+
+## Operação mínima (min_notional) e otimização
+
+### Entrar com o MÍNIMO (o sizing do Don)
+
+O sistema conhece as regras REAIS do instrumento (exchangeInfo) e calcula a
+operação mínima viável — para operar com o menor capital possível:
+
+- `risk.SizeMinNotional(rules, price)` → a menor quantidade que respeita
+  `min_notional`, `min_qty` e `step_size` da exchange.
+- O `PlaceOrder` valida o MÍNIMO (notional < min_notional → rejeita) e o MÁXIMO
+  (maxOrderUSDT) antes de gastar client_order_id.
+- **Exemplo real (BTCUSDT, filtro NOTIONAL novo):** min_notional = 5 USDT,
+  preço 62945 → operação mínima = 0.00008 BTC (≈5 USDT).
+
+> Nota: a Binance renomeou o filtro `MIN_NOTIONAL` para `NOTIONAL` — o parsing
+> aceita ambos (o antigo foi pego retornando zero).
+
+### Otimizador de acertividade (`strategy.Optimize`)
+
+O otimizador varre combinações de parâmetros da estratégia no histórico real e
+devolve a melhor por score (win rate 50% + Sharpe 30% + PF 20%). Exemplo real
+na contrarian: win rate subiu de 38% (default) para **54%** (calibrado: RSI
+sobrecomprado 80, sobrevendido 30, stop 1.5×ATR). A calibração vira varredura
+sistemática, não tentativa-e-erro.

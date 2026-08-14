@@ -301,14 +301,12 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 	return &ord, nil
 }
 
-// checkNotional aplica o limite de valor por ordem (P1-1). Notional = preço ×
+// checkNotional aplica o limite de valor por ordem (P1-1): MÁXIMO
+// (maxOrderUSDT) e MÍNIMO (min_notional da exchange). Notional = preço ×
 // quantidade; para ordens market sem preço, estima pelo preço corrente via
 // PriceProvider ou usa a quantidade como proxy conservador. Dinheiro em
 // decimal.Decimal — nunca float.
 func (o *OMS) checkNotional(ctx context.Context, req exchange.OrderRequest) error {
-	if o.maxOrderUSDT.Sign() <= 0 {
-		return nil // trava desativada (0 = ilimitado)
-	}
 	notional := req.Quantity // proxy para ordens market sem preço
 	if req.Price.Sign() > 0 {
 		notional = req.Price.Mul(req.Quantity)
@@ -317,8 +315,19 @@ func (o *OMS) checkNotional(ctx context.Context, req exchange.OrderRequest) erro
 			notional = px.Mul(req.Quantity)
 		}
 	}
-	if notional.GreaterThan(o.maxOrderUSDT) {
+
+	// MÁXIMO: trava de valor por ordem (P1-1). Zero = ilimitado.
+	if o.maxOrderUSDT.Sign() > 0 && notional.GreaterThan(o.maxOrderUSDT) {
 		return errors.Join(ErrOrderTooLarge, fmt.Errorf("notional %s USDT excede o limite %s USDT por ordem (%s)", notional, o.maxOrderUSDT, req.Symbol))
+	}
+
+	// MÍNIMO: o "entrar com o mínimo" do Don — se o broker expõe as regras do
+	// instrumento (exchangeInfo), a ordem abaixo do min_notional é rejeitada
+	// ANTES de chegar à exchange (fail rápido, sem gastar client_order_id).
+	if iip, ok := o.broker.(exchange.InstrumentInfoProvider); ok {
+		if rules, ok := iip.InstrumentRules(ctx, req.Symbol); ok && rules.MinNotional.IsPositive() && notional.LessThan(rules.MinNotional) {
+			return errors.Join(risk.ErrSizeBelowMinimum, fmt.Errorf("notional %s abaixo do mínimo da exchange %s (%s) — entre com pelo menos o valor mínimo", notional, rules.MinNotional, req.Symbol))
+		}
 	}
 	return nil
 }

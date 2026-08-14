@@ -19,6 +19,7 @@ var registry = map[string]Factory{
 	"rsi-reversion": func() Strategy { return NewReversion() },
 	"breakout":      func() Strategy { return NewBreakout() },
 	"bb-reversion":  func() Strategy { return NewBBReversion() },
+	"contrarian":    func() Strategy { return NewContrarian() },
 }
 
 // Register adiciona uma estratégia ao catálogo (permite plugins).

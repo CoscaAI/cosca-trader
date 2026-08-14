@@ -119,6 +119,26 @@ func (c *Client) symbolInfo(symbol string) (SymbolInfo, bool) {
 	return c.info.Get(symbol)
 }
 
+// InstrumentRules implementa exchange.InstrumentInfoProvider: devolve as
+// regras do instrumento no formato compartilhado (para o OMS validar o MÍNIMO
+// da operação — o "entrar com o mínimo" do Don). Fail-closed: sem cache,
+// devolve ok=false (não bloqueia por falta de metadados).
+func (c *Client) InstrumentRules(ctx context.Context, symbol string) (exchange.InstrumentRules, bool) {
+	if err := c.ensureInfo(ctx); err != nil {
+		return exchange.InstrumentRules{}, false
+	}
+	si, ok := c.symbolInfo(symbol)
+	if !ok {
+		return exchange.InstrumentRules{}, false
+	}
+	return exchange.InstrumentRules{
+		MinNotional: si.MinNotional,
+		MinQty:      si.MinQty,
+		StepSize:    si.StepSize,
+		TickSize:    si.TickSize,
+	}, true
+}
+
 // toBinanceType converte o tipo de ordem de domínio para o nome aceito pela
 // API da Binance (spot). STOP/STOP_MARKET viram STOP_LOSS (spot não tem
 // STOP_MARKET); STOP_LIMIT vira STOP_LOSS_LIMIT.

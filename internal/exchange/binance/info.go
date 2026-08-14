@@ -99,6 +99,12 @@ func (i *Info) Load(ctx context.Context) error {
 				si.StepSize, _ = parseDecimal(f.StepSize)
 				si.MinQty, _ = parseDecimal(f.MinQty)
 			case "MIN_NOTIONAL":
+				// Filtro antigo (deprecado): minNotional direto.
+				si.MinNotional, _ = parseDecimal(f.MinNotional)
+			case "NOTIONAL":
+				// Filtro novo (2024+): NOTIONAL com minNotional — a Binance
+				// renomeou. minNotional=0 significa "sem mínimo" (mercados
+				// isentos); o valor real (ex.: 5.0) é o mínimo da operação.
 				si.MinNotional, _ = parseDecimal(f.MinNotional)
 			}
 		}

@@ -65,3 +65,62 @@ func TestSizeInvalidParams(t *testing.T) {
 		t.Fatalf("esperava ErrSizeStopTooClose, got %v", err)
 	}
 }
+
+func TestSizeMinNotional(t *testing.T) {
+	// BTCUSDT: min_notional 10 USDT, preço 60000 → qty mínima = 10/60000
+	// = 0.00016666..., arredondada para cima ao step 0.00001 → 0.00017.
+	rules := InstrumentRules{
+		MinNotional: decimal.NewFromInt(10),
+		MinQty:      decimal.NewFromFloat(0.00001),
+		StepSize:    decimal.NewFromFloat(0.00001),
+	}
+	qty, err := SizeMinNotional(rules, decimal.NewFromInt(60000))
+	if err != nil {
+		t.Fatalf("SizeMinNotional: %v", err)
+	}
+	// 10/60000 = 0.0001666... → ceil ao step 0.00001 = 0.00017
+	if !qty.Equal(decimal.NewFromFloat(0.00017)) {
+		t.Fatalf("qty mínima esperada 0.00017, got %v", qty)
+	}
+	// Notional real = 0.00017 × 60000 = 10.2 ≥ min 10 ✓
+	notional := qty.Mul(decimal.NewFromInt(60000))
+	if notional.LessThan(decimal.NewFromInt(10)) {
+		t.Fatalf("notional %v abaixo do mínimo", notional)
+	}
+}
+
+func TestSizeMinNotionalRespectsMinQty(t *testing.T) {
+	// Se o min_qty (0.001) > qty_por_notional (10/60000), o min_qty vence.
+	rules := InstrumentRules{
+		MinNotional: decimal.NewFromInt(10),
+		MinQty:      decimal.NewFromFloat(0.001),
+		StepSize:    decimal.NewFromFloat(0.001),
+	}
+	qty, err := SizeMinNotional(rules, decimal.NewFromInt(60000))
+	if err != nil {
+		t.Fatalf("SizeMinNotional: %v", err)
+	}
+	if !qty.Equal(decimal.NewFromFloat(0.001)) {
+		t.Fatalf("qty mínima esperada 0.001 (min_qty vence), got %v", qty)
+	}
+}
+
+func TestValidarPreTrade(t *testing.T) {
+	rules := InstrumentRules{
+		MinNotional: decimal.NewFromInt(10),
+		MinQty:      decimal.NewFromFloat(0.00001),
+		StepSize:    decimal.NewFromFloat(0.00001),
+	}
+	// Abaixo do min_notional → erro.
+	if _, err := ValidarPreTrade(rules, decimal.NewFromInt(60000), decimal.NewFromFloat(0.00005)); !errors.Is(err, ErrSizeBelowMinimum) {
+		t.Fatalf("esperava ErrSizeBelowMinimum, got %v", err)
+	}
+	// Válido e arredondado ao step: 0.0005 × 60000 = 30 ≥ 10 ✓
+	qty, err := ValidarPreTrade(rules, decimal.NewFromInt(60000), decimal.NewFromFloat(0.00055))
+	if err != nil {
+		t.Fatalf("ValidarPreTrade: %v", err)
+	}
+	if !qty.Equal(decimal.NewFromFloat(0.00055)) {
+		t.Fatalf("qty esperada 0.00055 (floor ao step), got %v", qty)
+	}
+}
