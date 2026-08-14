@@ -141,6 +141,17 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("abrir sqlite: %w", err)
 	}
+	// CAUSA RAIZ do SQLITE_BUSY (F4B smoke test): o PRAGMA busy_timeout é
+	// PER-CONNECTION — o pool do database/sql abre várias conexões, e cada
+	// uma nova nasce SEM o pragma, conflitando com a principal (WAL não
+	// resolve: leitores e escritores ainda disputam o lock de escrita).
+	// Fix definitivo: UMA única conexão serializada. Para SQLite embarcado
+	// com evento-driven de produtores múltiplos (market data + user stream +
+	// OMS), serializar é a escolha certa — o lock do banco vira o mutex.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0) // conexão única vive com o processo
+
 	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		db.Close()
 		return nil, err
@@ -149,8 +160,8 @@ func Open(path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
-	// Vários produtores (market data + user stream + OMS) escrevem no mesmo
-	// SQLite — aguardar o lock concorrente evita SQLITE_BUSY espúrio em WAL.
+	// Ainda assim mantemos o busy_timeout como rede de segurança (o sistema
+	// de arquivos pode segurar o lock momentaneamente em WAL).
 	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
 		db.Close()
 		return nil, err
