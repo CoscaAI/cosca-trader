@@ -6,11 +6,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import GridLayout from "react-grid-layout";
 
-// O @types do react-grid-layout está defasado (não reconhece props como cols,
-// tipa onLayoutChange errado). O runtime é estável — usamos o componente sem
-// a tipagem quebrada, mantendo o shape do item declarado localmente.
+// O @types do react-grid-layout está defasado (não reconhece props nem o
+// WidthProvider). O runtime expõe tudo via module.exports — acessamos o
+// WidthProvider pelo default (eslint-disabled por pragmatismo documentado).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const Grid = GridLayout as unknown as React.ComponentType<any>;
+const GLPkg = GridLayout as any;
+const Grid = GLPkg.WidthProvider(GLPkg) as React.ComponentType<any>;
 
 // Shape de um item do layout (x/y/w/h + mínimos) — o array do painel.
 type GridLayoutItem = {
@@ -944,14 +945,13 @@ export default function App() {
           layout={layout}
           cols={12}
           rowHeight={34}
-          width={1200}
           margin={[14, 14]}
           containerPadding={[4, 4]}
           draggableHandle=".card-drag"
-          onLayoutChange={onLayoutChange}
+          onDragStop={onLayoutChange}
+          onResizeStop={onLayoutChange}
           isResizable
           isDraggable
-          compactType="vertical"
           useCSSTransforms
         >
           <div key="chart" className="card chart-card">
