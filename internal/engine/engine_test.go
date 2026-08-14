@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/CoscaAI/cosca-trader/internal/event"
+	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
 func TestEmitFillsDefaults(t *testing.T) {
@@ -58,5 +60,52 @@ func TestEmitBusOrdering(t *testing.T) {
 
 	if storeLenAtDispatch != 1 {
 		t.Errorf("no dispatch o store tinha %d eventos; persistir-before-publish violado", storeLenAtDispatch)
+	}
+}
+
+func TestEmitMoneyEventFailStopOnPersistError(t *testing.T) {
+	// Fase 2A: evento de DINHEIRO com persistência falha → Emit devolve erro
+	// (fail-parado). Evento de market data continua tolerante.
+	db, err := store.Open(filepath.Join(t.TempDir(), "x.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	db.Close() // força falha de persistência (database is closed)
+
+	e := New(db)
+
+	if err := e.Emit(event.Event{Type: event.OrderCreated, Source: "oms"}); err == nil {
+		t.Fatal("OrderCreated sem persistência deveria falhar (fail-parado)")
+	}
+	if err := e.Emit(event.Event{Type: event.TradeExecuted, Source: "oms"}); err == nil {
+		t.Fatal("TradeExecuted sem persistência deveria falhar (fail-parado)")
+	}
+	// Market data: tolerante — não devolve erro mesmo com o disco falho.
+	if err := e.Emit(event.Event{Type: event.MarketTick, Source: "feed"}); err != nil {
+		t.Errorf("MarketTick não deveria falhar o Emit (tolerante): %v", err)
+	}
+}
+
+func TestIsMoneyEventClassification(t *testing.T) {
+	money := []event.Type{
+		event.OrderCreated, event.OrderSubmitted, event.OrderFilled, event.OrderPartiallyFilled,
+		event.OrderCanceled, event.OrderRejected, event.OrderExpired,
+		event.TradeExecuted, event.PositionOpened, event.PositionUpdated, event.PositionClosed,
+		event.BalanceUpdated, event.RiskBreach, event.RiskWarning,
+	}
+	for _, ty := range money {
+		if !isMoneyEvent(ty) {
+			t.Errorf("%q deveria ser evento de dinheiro (fail-stop)", ty)
+		}
+	}
+	tolerant := []event.Type{
+		event.MarketTick, event.CandleClosed, event.OrderBookUpdate, event.DepthSnapshot,
+		event.ExchangeConnected, event.ExchangeDisconnected, event.ExchangeError,
+		event.StrategySignal, event.SystemStarted, event.SystemStopped,
+	}
+	for _, ty := range tolerant {
+		if isMoneyEvent(ty) {
+			t.Errorf("%q NÃO deveria ser evento de dinheiro (tolerante)", ty)
+		}
 	}
 }

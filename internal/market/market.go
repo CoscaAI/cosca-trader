@@ -16,11 +16,13 @@ import (
 // MarketData observa uma exchange e emite eventos de mercado.
 type MarketData struct {
 	ex   exchange.Exchange
-	emit func(event.Event)
+	emit func(event.Event) error
 }
 
 // New cria o motor sobre uma exchange, com a função de emissão de eventos.
-func New(ex exchange.Exchange, emit func(event.Event)) *MarketData {
+// O emit devolve erro (ex.: engine.Emit) mas o market data é tolerante a
+// falha de persistência — o erro é descartado como statement.
+func New(ex exchange.Exchange, emit func(event.Event) error) *MarketData {
 	return &MarketData{ex: ex, emit: emit}
 }
 

@@ -34,7 +34,7 @@ func (f *fakeExchange) Close() error { return nil }
 func TestMarketEmitsEvents(t *testing.T) {
 	f := &fakeExchange{}
 	var events []event.Event
-	m := New(f, func(e event.Event) { events = append(events, e) })
+	m := New(f, func(e event.Event) error { events = append(events, e); return nil })
 
 	if err := m.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -61,7 +61,7 @@ func TestMarketEmitsEvents(t *testing.T) {
 
 func TestMarketWatchSubscribes(t *testing.T) {
 	f := &fakeExchange{}
-	m := New(f, func(event.Event) {})
+	m := New(f, func(event.Event) error { return nil })
 
 	if err := m.Watch("BTCUSDT", "1m"); err != nil {
 		t.Fatalf("Watch: %v", err)
@@ -78,7 +78,7 @@ func TestMarketWatchSubscribes(t *testing.T) {
 func TestMarketStatusSeverity(t *testing.T) {
 	f := &fakeExchange{}
 	var events []event.Event
-	m := New(f, func(e event.Event) { events = append(events, e) })
+	m := New(f, func(e event.Event) error { events = append(events, e); return nil })
 	_ = m.Start(context.Background())
 
 	f.handler.OnStatus(exchange.Status{Exchange: "fake", State: "error", Message: "boom"})

@@ -7,9 +7,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 
+	"github.com/shopspring/decimal"
+
+	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/event"
 )
 
@@ -104,6 +108,26 @@ CREATE TABLE IF NOT EXISTS balances (
     free   TEXT,
     locked TEXT
 );
+
+-- order_intents (Fase 2A): registro durável do client_order_id + request
+-- ANTES do envio ao broker — a âncora que fecha a janela de crash (ordem
+-- aceita na exchange sem OrderCreated no rastro). status:
+--   pending   → persistido, resultado do envio desconhecido
+--   submitted → confirmado na exchange (OrderCreated emitido)
+--   done      → ordem atingiu estado terminal (filled/canceled/expired)
+--   failed    → confirmado que a ordem NÃO existe na exchange
+CREATE TABLE IF NOT EXISTS order_intents (
+    client_order_id TEXT PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    type            TEXT NOT NULL,
+    price           TEXT NOT NULL DEFAULT '0',
+    quantity        TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_intents_status ON order_intents(status);
 `
 
 // DB encapsula a conexão SQLite com o schema de domínio aplicado.
@@ -152,6 +176,89 @@ func (d *DB) PersistEvent(ev event.Event) error {
 		return fmt.Errorf("inserir evento: %w", err)
 	}
 	return nil
+}
+
+// SaveIntent grava (ou atualiza, idempotente pela chave) um order intent.
+// É a FASE 1 da saga Fase 2A — o registro durável que precede o envio ao
+// broker. Falhar aqui NUNCA deve enviar a ordem para a exchange.
+func (d *DB) SaveIntent(i Intent) error {
+	_, err := d.Exec(
+		`INSERT INTO order_intents (client_order_id, symbol, side, type, price, quantity, status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(client_order_id) DO UPDATE SET
+			symbol = excluded.symbol, side = excluded.side, type = excluded.type,
+			price = excluded.price, quantity = excluded.quantity, status = excluded.status,
+			updated_at = excluded.updated_at`,
+		i.ClientOrderID, i.Symbol, string(i.Side), string(i.Type), i.Price.String(),
+		i.Quantity.String(), string(i.Status), timeFmt(i.CreatedAt), timeFmt(i.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("salvar intent %q: %w", i.ClientOrderID, err)
+	}
+	return nil
+}
+
+// UpdateIntentStatus avança o ciclo de vida de um intent (pending → submitted
+// → done / failed).
+func (d *DB) UpdateIntentStatus(clientOrderID string, status IntentStatus) error {
+	res, err := d.Exec(
+		`UPDATE order_intents SET status = ?, updated_at = ? WHERE client_order_id = ?`,
+		string(status), timeFmt(time.Now()), clientOrderID,
+	)
+	if err != nil {
+		return fmt.Errorf("atualizar intent %q para %q: %w", clientOrderID, status, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("intent %q não encontrado para atualizar", clientOrderID)
+	}
+	return nil
+}
+
+// PendingIntents devolve todos os intents ainda não resolvidos
+// ('pending'/'submitted') — a fonte do Reconcile para adotar ordens órfãs.
+func (d *DB) PendingIntents() ([]Intent, error) {
+	rows, err := d.Query(
+		`SELECT client_order_id, symbol, side, type, price, quantity, status, created_at, updated_at
+		 FROM order_intents WHERE status IN ('pending','submitted') ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Intent
+	for rows.Next() {
+		var it Intent
+		var side, typ, price, qty, status, created, updated string
+		if err := rows.Scan(&it.ClientOrderID, &it.Symbol, &side, &typ, &price, &qty, &status, &created, &updated); err != nil {
+			return nil, err
+		}
+		it.Side = domain.Side(side)
+		it.Type = domain.OrderType(typ)
+		it.Price, _ = parseDecimal(price)
+		it.Quantity, _ = parseDecimal(qty)
+		it.Status = IntentStatus(status)
+		it.CreatedAt, _ = parseTime(created)
+		it.UpdatedAt, _ = parseTime(updated)
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// parseDecimal converte a string persistida em decimal exato; string vazia
+// vira zero (nunca float no caminho de dinheiro).
+func parseDecimal(s string) (decimal.Decimal, error) {
+	if s == "" {
+		return decimal.Zero, nil
+	}
+	return decimal.NewFromString(s)
+}
+
+// timeFmt formata timestamps no mesmo formato do log de eventos.
+func timeFmt(t time.Time) string {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	return t.Format("2006-01-02T15:04:05.999999999Z07:00")
 }
 
 // AllEvents devolve todos os eventos do log durável, em ordem de seq.

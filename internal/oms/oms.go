@@ -27,6 +27,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/ledger"
+	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
 // Erros de validação do OMS.
@@ -38,10 +39,19 @@ var (
 	ErrOrderTooLarge  = errors.New("ordem acima do limite de valor")
 )
 
+// IntentStore é o repositório durável de order intents (Fase 2A) — a âncora
+// pré-broker que fecha a janela de crash. Implementada por *store.DB.
+type IntentStore interface {
+	SaveIntent(store.Intent) error
+	UpdateIntentStatus(clientOrderID string, status store.IntentStatus) error
+	PendingIntents() ([]store.Intent, error)
+}
+
 // OMS é o motor de ordens/posições/saldos.
 type OMS struct {
-	broker exchange.Broker
-	emit   func(event.Event)
+	broker  exchange.Broker
+	emit    func(event.Event) error
+	intents IntentStore // nil = intent durável desativado (saga em memória apenas)
 
 	mu           sync.RWMutex
 	orders       map[string]*domain.Order    // por ID da exchange
@@ -75,8 +85,17 @@ func WithStopLossPct(v decimal.Decimal) Option {
 	return func(o *OMS) { o.stopLossPct = v }
 }
 
-// New cria o OMS sobre um broker, emitindo eventos via emit.
-func New(broker exchange.Broker, emit func(event.Event), opts ...Option) *OMS {
+// WithIntentStore liga o intent durável pré-broker (Fase 2A): cada ordem
+// persiste um registro ANTES do envio à exchange, e o Reconcile adota ordens
+// órfãs consultando a exchange por origClientOrderId — fechando 100% a janela
+// de crash. Sem o store, a saga fica em memória (comportamento anterior).
+func WithIntentStore(s IntentStore) Option {
+	return func(o *OMS) { o.intents = s }
+}
+
+// New cria o OMS sobre um broker, emitindo eventos via emit. O emit devolve
+// erro (ex.: engine.Emit) — para eventos de dinheiro, falha = fail-stop.
+func New(broker exchange.Broker, emit func(event.Event) error, opts ...Option) *OMS {
 	o := &OMS{
 		broker:       broker,
 		emit:         emit,
@@ -112,7 +131,21 @@ func (o *OMS) KillSwitch() bool {
 	return o.kill
 }
 
-// PlaceOrder valida, envia à exchange, registra e emite OrderCreated.
+// PlaceOrder valida, envia à exchange, registra e emite OrderCreated. Desde a
+// Fase 2A é uma SAGA com 3 fases, fechando 100% a janela de crash:
+//
+//	a. FASE 1 (pré-broker): persiste o order intent com status 'pending'. Se a
+//	   persistência falhar, NÃO envia à exchange (falha limpa, sem ordem
+//	   fantasma nem chave órfã).
+//	b. FASE 2 (broker): envia à exchange.
+//	c. FASE 3 (pós-broker): sucesso → registra + emite OrderCreated + marca o
+//	   intent 'submitted'. Erro → saga de recuperação (recoverAfterError), que
+//	   adota se a ordem existir e marca 'failed' se confirmado que não.
+//
+// Fail-parado (Fase 2A): se o OrderCreated não persistir no rastro durável, o
+// PlaceOrder RETORNA ERRO em vez de reportar sucesso — mas a ordem existe na
+// exchange e o intent fica 'pending', então o Reconcile adota e reemite no
+// próximo ciclo. O operador nunca é enganado por um "sucesso" não durável.
 //
 // P0-3: kill switch é verificado no topo — com COSCA_TRADER_KILL=1 nenhuma
 // nova ordem sai para o mercado.
@@ -160,13 +193,45 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 		return nil, err
 	}
 
+	// FASE 1 (pré-broker): intent durável — a âncora que fecha a janela de
+	// crash. Se falhar, NÃO enviamos à exchange: falha limpa, sem ordem
+	// fantasma.
+	if o.intents != nil {
+		if err := o.intents.SaveIntent(store.Intent{
+			ClientOrderID: req.ClientOrderID,
+			Symbol:        req.Symbol,
+			Side:          req.Side,
+			Type:          req.Type,
+			Price:         req.Price,
+			Quantity:      req.Quantity,
+			Status:        store.IntentPending,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
+		}); err != nil {
+			o.mu.Lock()
+			delete(o.pending, req.ClientOrderID)
+			o.mu.Unlock()
+			return nil, errors.Join(ErrInvalidOrder, fmt.Errorf("falha ao persistir intent %q — ordem NÃO enviada à exchange: %w", req.ClientOrderID, err))
+		}
+	}
+
+	// FASE 2 (broker): envio à exchange.
 	ord, err := o.broker.PlaceOrder(ctx, req)
 	if err != nil {
 		return o.recoverAfterError(ctx, req, err)
 	}
 
+	// FASE 3 (pós-broker): sucesso → adota + rastro + intent 'submitted'.
 	o.registerOrder(req, ord)
-	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
+	if err := o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord}); err != nil {
+		// Fail-parado: a ordem EXISTE na exchange, mas o rastro durável falhou.
+		// Não reportamos sucesso; o intent permanece 'pending' e o Reconcile
+		// adota + reemite o OrderCreated no próximo ciclo.
+		return nil, errors.Join(err, fmt.Errorf("ordem %s aceita na exchange, mas OrderCreated não persistiu — intent %q fica 'pending' para o Reconcile adotar", ord.ID, req.ClientOrderID))
+	}
+	if err := o.markIntentStatus(req.ClientOrderID, store.IntentSubmitted); err != nil {
+		log.Printf("⚠ oms: %v", err) // 'pending' só faz o Reconcile reconsultar — não é fatal
+	}
 	return &ord, nil
 }
 
@@ -241,9 +306,11 @@ func (o *OMS) placeStopLossAsync(pos domain.Position) {
 	}
 }
 
-// recoverAfterError é a saga de recuperação P0-2: após um erro do broker
+// recoverAfterError é a saga de recuperação P0-2/P0-2A: após um erro do broker
 // (timeout, conexão perdida), consulta a exchange pelo client_order_id para
-// descobrir se a ordem foi aceita antes de reportar falha.
+// descobrir se a ordem foi aceita antes de reportar falha. Em Fase 2A, o
+// resultado também avança o intent durável: adotada → 'submitted'; confirmada
+// inexistente → 'failed'.
 func (o *OMS) recoverAfterError(ctx context.Context, req exchange.OrderRequest, origErr error) (*domain.Order, error) {
 	// 1. Broker com OrderRecoverer: consulta direta pelo origClientOrderId.
 	if rec, ok := o.broker.(exchange.OrderRecoverer); ok {
@@ -254,7 +321,9 @@ func (o *OMS) recoverAfterError(ctx context.Context, req exchange.OrderRequest, 
 			return nil, errors.Join(origErr, fmt.Errorf("estado ambíguo: client_order_id %q travado até reconciliação", req.ClientOrderID))
 		}
 		if ord.ID != "" {
-			o.adoptRecovered(req, ord)
+			if err := o.adoptRecovered(req, ord); err != nil {
+				return nil, errors.Join(origErr, err)
+			}
 			return &ord, nil
 		}
 	}
@@ -264,20 +333,28 @@ func (o *OMS) recoverAfterError(ctx context.Context, req exchange.OrderRequest, 
 		return nil, errors.Join(origErr, fmt.Errorf("estado ambíguo: client_order_id %q travado até reconciliação", req.ClientOrderID))
 	}
 	if found {
-		o.adoptRecovered(req, ord)
+		if err := o.adoptRecovered(req, ord); err != nil {
+			return nil, errors.Join(origErr, err)
+		}
 		return &ord, nil
 	}
-	// 3. Confirmado que a ordem NÃO existe → falha real; libera a trava.
+	// 3. Confirmado que a ordem NÃO existe → falha real; libera a trava e
+	//    marca o intent 'failed' (só resta como histórico).
 	o.mu.Lock()
 	delete(o.pending, req.ClientOrderID)
 	o.mu.Unlock()
+	if err := o.markIntentStatus(req.ClientOrderID, store.IntentFailed); err != nil {
+		log.Printf("⚠ oms: %v", err)
+	}
 	return nil, origErr
 }
 
 // adoptRecovered registra uma ordem que a saga descobriu na exchange (foi
-// aceita mesmo com a resposta perdida) e emite OrderCreated — o cliente recebe
-// a ordem criada em vez de um erro falso.
-func (o *OMS) adoptRecovered(req exchange.OrderRequest, ord domain.Order) {
+// aceita mesmo com a resposta perdida), emite OrderCreated — o cliente recebe
+// a ordem criada em vez de um erro falso — e avança o intent para 'submitted'.
+// Devolve erro se o OrderCreated não persistir (fail-parado; o intent fica
+// 'pending' e o Reconcile reemite depois).
+func (o *OMS) adoptRecovered(req exchange.OrderRequest, ord domain.Order) error {
 	o.mu.Lock()
 	if _, known := o.orders[ord.ID]; !known {
 		o.orders[ord.ID] = &ord
@@ -291,7 +368,10 @@ func (o *OMS) adoptRecovered(req exchange.OrderRequest, ord domain.Order) {
 	}
 	delete(o.pending, req.ClientOrderID)
 	o.mu.Unlock()
-	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
+	if err := o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord}); err != nil {
+		return err
+	}
+	return o.markIntentStatus(req.ClientOrderID, store.IntentSubmitted)
 }
 
 // recoverFromOpenOrders procura a ordem em ordens abertas dos símbolos
@@ -326,16 +406,20 @@ func (o *OMS) registerOrder(req exchange.OrderRequest, ord domain.Order) {
 	delete(o.pending, req.ClientOrderID)
 }
 
-// CancelOrder cancela uma ordem ativa e emite OrderCanceled.
+// CancelOrder cancela uma ordem ativa e emite OrderCanceled. Falha-parado se
+// o evento não persistir (o cancelamento foi executado, mas o rastro falhou —
+// o operador é informado em vez de ver um sucesso não durável).
 func (o *OMS) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	if err := o.broker.CancelOrder(ctx, symbol, orderID); err != nil {
 		return err
 	}
-	o.emitEvent(event.Event{
+	if err := o.emitEvent(event.Event{
 		Type:    event.OrderCanceled,
 		Source:  "oms",
 		Payload: map[string]any{"symbol": symbol, "order_id": orderID},
-	})
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -369,7 +453,20 @@ func (o *OMS) ApplyOrderUpdate(ord domain.Order) {
 		t = event.OrderExpired
 		sev = event.SeverityWarning
 	}
-	o.emitEvent(event.Event{Type: t, Source: "oms", Severity: sev, Payload: ord})
+	if err := o.emitEvent(event.Event{Type: t, Source: "oms", Severity: sev, Payload: ord}); err != nil {
+		// Path de stream (user data) não pode falhar-parado no meio da
+		// entrega — loga alto e segue; a reconciliação + intent recuperam o
+		// estado durável no próximo ciclo.
+		log.Printf("⚠ oms: persistência de %s falhou: %v", t, err)
+	}
+
+	// Fase 2A: estado terminal (filled/canceled/expired) → intent 'done',
+	// para o Reconcile parar de varrer a chave.
+	if ord.IsClosed() && ord.ClientOrderID != "" {
+		if err := o.markIntentStatus(ord.ClientOrderID, store.IntentDone); err != nil {
+			log.Printf("⚠ oms: %v", err)
+		}
+	}
 }
 
 // ApplyTrade consolida um fill (idempotente por Trade.ID): rastreia fee,
@@ -404,12 +501,20 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 	o.mu.Unlock()
 
 	// Emite DEPOIS de mutar (persist-before-publish + estado consistente).
-	o.emitEvent(event.Event{Type: event.TradeExecuted, Source: "oms", Payload: t})
+	// Path de stream: falha de persistência loga alto (não pode travar o user
+	// stream) — o intent/reconciliação recupera o estado durável depois.
+	if err := o.emitEvent(event.Event{Type: event.TradeExecuted, Source: "oms", Payload: t}); err != nil {
+		log.Printf("⚠ oms: persistência de TradeExecuted falhou: %v", err)
+	}
 	if closed {
-		o.emitEvent(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos})
+		if err := o.emitEvent(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos}); err != nil {
+			log.Printf("⚠ oms: persistência de PositionClosed falhou: %v", err)
+		}
 	}
 	if opened {
-		o.emitEvent(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos})
+		if err := o.emitEvent(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos}); err != nil {
+			log.Printf("⚠ oms: persistência de PositionOpened falhou: %v", err)
+		}
 		// P1-2: stop-loss automático — protege a posição assim que ela abre
 		// (nunca durante Replay, que não pode tocar na exchange).
 		if o.stopLossPct.Sign() > 0 && !o.replaying {
@@ -418,7 +523,9 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 		}
 	}
 	if !opened && !closed {
-		o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos})
+		if err := o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos}); err != nil {
+			log.Printf("⚠ oms: persistência de PositionUpdated falhou: %v", err)
+		}
 	}
 }
 
@@ -427,7 +534,9 @@ func (o *OMS) ApplyBalance(b domain.Balance) {
 	o.mu.Lock()
 	o.balances[b.Asset] = b
 	o.mu.Unlock()
-	o.emitEvent(event.Event{Type: event.BalanceUpdated, Source: "oms", Payload: b})
+	if err := o.emitEvent(event.Event{Type: event.BalanceUpdated, Source: "oms", Payload: b}); err != nil {
+		log.Printf("⚠ oms: persistência de BalanceUpdated falhou: %v", err)
+	}
 }
 
 // Orders devolve uma cópia das ordens conhecidas.
@@ -493,12 +602,33 @@ func (o *OMS) Ledger() *ledger.Ledger {
 }
 
 // emitEvent emite um evento, suprimindo a emissão durante o Replay (os eventos
-// já estão no rastro — reemitir duplicaria).
-func (o *OMS) emitEvent(ev event.Event) {
+// já estão no rastro — reemitir duplicaria). O erro devolve o falha-parado do
+// emit (engine.Emit) para eventos de dinheiro cuja persistência falhou.
+func (o *OMS) emitEvent(ev event.Event) error {
 	if o.replaying {
-		return
+		return nil
 	}
-	o.emit(ev)
+	return o.emit(ev)
+}
+
+// markIntentStatus avança o intent durável de um client_order_id. Sem intent
+// store (modo em memória) é no-op.
+func (o *OMS) markIntentStatus(clientOrderID string, status store.IntentStatus) error {
+	if o.intents == nil || clientOrderID == "" {
+		return nil
+	}
+	if err := o.intents.UpdateIntentStatus(clientOrderID, status); err != nil {
+		return fmt.Errorf("atualizar intent %q para %q: %w", clientOrderID, status, err)
+	}
+	return nil
+}
+
+// orderKnown devolve se o OMS já conhece uma ordem pelo ID da exchange.
+func (o *OMS) orderKnown(id string) bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	_, ok := o.orders[id]
+	return ok
 }
 
 // Replay reconstrói o estado do OMS a partir do rastro persistido. Deve ser
@@ -570,13 +700,47 @@ func (o *OMS) Reconcile(ctx context.Context) error {
 		if err != nil || ord.ID == "" {
 			continue
 		}
-		o.mu.RLock()
-		_, known := o.orders[ord.ID]
-		o.mu.RUnlock()
-		if known {
+		if o.orderKnown(ord.ID) {
 			continue
 		}
 		o.ApplyOrderUpdate(ord) // adota a ordem órfã
+	}
+
+	// Fase 2A: intents duráveis — fecha a janela de crash MESMO SEM símbolos
+	// conhecidos. Todo intent 'pending'/'submitted' é consultado na exchange
+	// por origClientOrderId: se existir, adota (register + OrderCreated se
+	// ainda não emitido); se confirmadamente não existir, marca 'failed'.
+	if o.intents != nil {
+		intents, err := o.intents.PendingIntents()
+		if err != nil {
+			return fmt.Errorf("listar intents pendentes: %w", err)
+		}
+		for _, it := range intents {
+			if it.ClientOrderID == "" {
+				continue
+			}
+			ord, err := rec.OrderByClientOrderID(ctx, it.Symbol, it.ClientOrderID)
+			if err != nil {
+				continue // ambíguo — mantém para a próxima reconciliação
+			}
+			if ord.ID == "" {
+				// Confirmado que a ordem não existe na exchange → intent 'failed'.
+				if err := o.markIntentStatus(it.ClientOrderID, store.IntentFailed); err != nil {
+					log.Printf("⚠ oms: %v", err)
+				}
+				continue
+			}
+			if !o.orderKnown(ord.ID) {
+				// Órfã do crash window: adota + emite OrderCreated.
+				if err := o.adoptRecovered(exchange.OrderRequest{ClientOrderID: it.ClientOrderID, Symbol: it.Symbol}, ord); err != nil {
+					log.Printf("⚠ oms: adoção da ordem órfã %q falhou: %v", it.ClientOrderID, err)
+					continue // intent continua 'pending' — tenta de novo
+				}
+			}
+			if err := o.markIntentStatus(it.ClientOrderID, store.IntentSubmitted); err != nil {
+				log.Printf("⚠ oms: %v", err)
+			}
+		}
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
 func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
@@ -65,7 +67,7 @@ func itoa(n int) string {
 func TestPlaceOrderEmitsCreated(t *testing.T) {
 	b := &fakeBroker{}
 	var events []event.Event
-	o := New(b, func(e event.Event) { events = append(events, e) })
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil })
 
 	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
@@ -88,7 +90,7 @@ func TestPlaceOrderEmitsCreated(t *testing.T) {
 func TestPlaceOrderIdempotentByClientID(t *testing.T) {
 	b := &fakeBroker{}
 	var events []event.Event
-	o := New(b, func(e event.Event) { events = append(events, e) })
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil })
 
 	req := exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
@@ -107,7 +109,7 @@ func TestPlaceOrderIdempotentByClientID(t *testing.T) {
 }
 
 func TestPlaceOrderValidates(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	cases := []exchange.OrderRequest{
 		{Symbol: "", Side: domain.SideBuy, Quantity: d("1")},                                        // sem símbolo
 		{Symbol: "BTCUSDT", Side: "hold", Quantity: d("1")},                                         // lado inválido
@@ -123,7 +125,7 @@ func TestPlaceOrderValidates(t *testing.T) {
 }
 
 func TestApplyTradeOpensPosition(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
 
 	pos, ok := o.Position("BTCUSDT", "binance")
@@ -136,7 +138,7 @@ func TestApplyTradeOpensPosition(t *testing.T) {
 }
 
 func TestApplyTradeAveragesUp(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	ts := time.Now()
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("1"), Timestamp: ts})
 	o.ApplyTrade(domain.Trade{ID: "t2", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("200"), Quantity: d("1"), Timestamp: ts})
@@ -148,7 +150,7 @@ func TestApplyTradeAveragesUp(t *testing.T) {
 }
 
 func TestApplyTradeRealizesPnL(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	ts := time.Now()
 	// compra 2 @ 100
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: ts})
@@ -165,7 +167,7 @@ func TestApplyTradeRealizesPnL(t *testing.T) {
 }
 
 func TestApplyTradePreservesRealizedPnLOnReopen(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	ts := time.Now()
 	// ciclo 1: compra 1 @ 100, vende 1 @ 200 → PnL 100
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("1"), Timestamp: ts})
@@ -180,7 +182,7 @@ func TestApplyTradePreservesRealizedPnLOnReopen(t *testing.T) {
 }
 
 func TestApplyTradeFlipsPosition(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	ts := time.Now()
 	// long 1 @ 100
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("1"), Timestamp: ts})
@@ -197,7 +199,7 @@ func TestApplyTradeFlipsPosition(t *testing.T) {
 }
 
 func TestApplyTradeDedupsByID(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	ts := time.Now()
 	trade := domain.Trade{ID: "dup-1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: ts}
 
@@ -211,7 +213,7 @@ func TestApplyTradeDedupsByID(t *testing.T) {
 }
 
 func TestApplyTradeTracksFees(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "X", Exchange: "e", Side: domain.SideBuy, Price: d("100"), Quantity: d("1"), Fee: d("0.5"), FeeAsset: "USDT", Timestamp: time.Now()})
 
 	fees := o.Fees()
@@ -223,7 +225,7 @@ func TestApplyTradeTracksFees(t *testing.T) {
 func TestApplyOrderUpdate(t *testing.T) {
 	b := &fakeBroker{}
 	var events []event.Event
-	o := New(b, func(e event.Event) { events = append(events, e) })
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil })
 
 	ord, _ := o.PlaceOrder(context.Background(), exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("100"),
@@ -245,7 +247,7 @@ func TestApplyOrderUpdate(t *testing.T) {
 }
 
 func TestApplyBalance(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	o.ApplyBalance(domain.Balance{Asset: "USDT", Free: d("1000"), Locked: d("500")})
 
 	b := o.Balances()
@@ -256,7 +258,7 @@ func TestApplyBalance(t *testing.T) {
 
 func TestReplayReconstructsState(t *testing.T) {
 	var emitted []event.Event
-	o := New(&fakeBroker{}, func(e event.Event) { emitted = append(emitted, e) })
+	o := New(&fakeBroker{}, func(e event.Event) error { emitted = append(emitted, e); return nil })
 
 	ts := time.Now()
 	events := []event.Event{
@@ -287,7 +289,7 @@ func TestReplayReconstructsState(t *testing.T) {
 func TestReplayDecodesRawMessage(t *testing.T) {
 	// Simula payload vindo do disco (json.RawMessage, como o db.AllEvents devolve).
 	var emitted []event.Event
-	o := New(&fakeBroker{}, func(e event.Event) { emitted = append(emitted, e) })
+	o := New(&fakeBroker{}, func(e event.Event) error { emitted = append(emitted, e); return nil })
 
 	raw := json.RawMessage(`{"id":"t1","symbol":"BTCUSDT","exchange":"binance","side":"buy","price":"100","quantity":"2","timestamp":"2026-08-13T00:00:00Z"}`)
 	o.Replay([]event.Event{{Type: event.TradeExecuted, Payload: raw}})
@@ -306,7 +308,7 @@ func TestReconcileSyncsBalancesAndOrders(t *testing.T) {
 		balances: []domain.Balance{{Asset: "USDT", Free: d("9000")}},
 		orders:   []domain.Order{{ID: "o9", Symbol: "BTCUSDT", Exchange: "binance", Status: domain.OrderNew, Side: domain.SideBuy}},
 	}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	// registra um símbolo conhecido para a reconciliação de ordens
 	o.ApplyOrderUpdate(domain.Order{ID: "seed", Symbol: "BTCUSDT", Exchange: "binance", Status: domain.OrderNew})
 
@@ -429,7 +431,7 @@ func (p *priceBroker) Price(_ context.Context, _ string) (decimal.Decimal, error
 
 func TestPlaceOrderNotionalLimit(t *testing.T) {
 	b := &priceBroker{price: d("50000")}
-	o := New(b, func(event.Event) {}, WithMaxOrderUSDT(d("1000")))
+	o := New(b, func(event.Event) error { return nil }, WithMaxOrderUSDT(d("1000")))
 
 	// limit: 50000 × 1 = 50000 > 1000 → rejeitado
 	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
@@ -471,7 +473,7 @@ func TestPlaceOrderNotionalLimit(t *testing.T) {
 func TestPlaceOrderNoLimitWhenDisabled(t *testing.T) {
 	// limite 0 = desativado: ordem grande passa (padrão de biblioteca).
 	b := &fakeBroker{}
-	o := New(b, func(event.Event) {}, WithMaxOrderUSDT(decimal.Zero))
+	o := New(b, func(event.Event) error { return nil }, WithMaxOrderUSDT(decimal.Zero))
 	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("100"), Price: d("50000"),
 	})
@@ -526,7 +528,7 @@ func (t *trackingBroker) StartUserStream(_ context.Context, _ exchange.Handler) 
 // ── P1-2: stop-loss automático + validação de stop orders ──────────────────
 
 func TestPlaceOrderRequiresStopPrice(t *testing.T) {
-	o := New(&fakeBroker{}, func(event.Event) {})
+	o := New(&fakeBroker{}, func(event.Event) error { return nil })
 	cases := []exchange.OrderRequest{
 		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStop, Quantity: d("1")},
 		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStopMarket, Quantity: d("1")},
@@ -547,7 +549,7 @@ func TestPlaceOrderRequiresStopPrice(t *testing.T) {
 
 func TestPlaceStopLoss(t *testing.T) {
 	b := &fakeBroker{}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 
 	// long 2 @ 100, pct 5% → SELL stop a 95, quantidade 2.
 	ord, err := o.PlaceStopLoss(context.Background(), domain.Position{
@@ -584,7 +586,7 @@ func TestPlaceStopLoss(t *testing.T) {
 
 func TestAutoStopLossOnPositionOpen(t *testing.T) {
 	b := &trackingBroker{}
-	o := New(b, func(event.Event) {}, WithStopLossPct(d("0.05")))
+	o := New(b, func(event.Event) error { return nil }, WithStopLossPct(d("0.05")))
 
 	o.ApplyTrade(domain.Trade{
 		ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
@@ -617,7 +619,7 @@ func TestAutoStopLossOnPositionOpen(t *testing.T) {
 
 func TestApplyOrderUpdateOrderExpired(t *testing.T) {
 	var events []event.Event
-	o := New(&fakeBroker{}, func(e event.Event) { events = append(events, e) })
+	o := New(&fakeBroker{}, func(e event.Event) error { events = append(events, e); return nil })
 
 	o.ApplyOrderUpdate(domain.Order{ID: "o1", Symbol: "BTCUSDT", Status: domain.OrderExpired})
 
@@ -633,7 +635,7 @@ func TestApplyOrderUpdateOrderExpired(t *testing.T) {
 
 func TestKillSwitchBlocksNewOrders(t *testing.T) {
 	b := &fakeBroker{}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	o.SetKillSwitch(true)
 
 	req := exchange.OrderRequest{
@@ -656,7 +658,7 @@ func TestKillSwitchBlocksNewOrders(t *testing.T) {
 
 func TestPlaceOrderAutoGeneratesClientOrderID(t *testing.T) {
 	b := &fakeBroker{}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("50000"),
 	})
@@ -673,7 +675,7 @@ func TestPlaceOrderAutoGeneratesClientOrderID(t *testing.T) {
 
 func TestPlaceOrderRejectsAmbiguousDuplicate(t *testing.T) {
 	b := &ambiguousBroker{}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	req := exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "dup-amb",
 	}
@@ -697,7 +699,7 @@ func TestPlaceOrderSagaRecoversAcceptedOrder(t *testing.T) {
 		found:          domain.Order{ID: "o-rec", ClientOrderID: "cli-1", Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), Status: domain.OrderNew},
 	}
 	var events []event.Event
-	o := New(b, func(e event.Event) { events = append(events, e) })
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil })
 
 	req := exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "cli-1",
@@ -721,7 +723,7 @@ func TestPlaceOrderSagaRecoversAcceptedOrder(t *testing.T) {
 
 func TestPlaceOrderConfirmedFailureUnlocksKey(t *testing.T) {
 	b := &sagaBroker{failPlaceOrder: true} // found vazio = confirmado que NÃO existe
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	req := exchange.OrderRequest{
 		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "cli-2",
 	}
@@ -744,7 +746,7 @@ func TestReconcileAdoptsOrphanByClientOrderID(t *testing.T) {
 		ID: "orphan", ClientOrderID: "cli-x", Symbol: "BTCUSDT", Exchange: "binance",
 		Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("100"), Status: domain.OrderNew,
 	}}
-	o := New(b, func(event.Event) {})
+	o := New(b, func(event.Event) error { return nil })
 	// simula uma chave ambígua persistida (tentativa cujo resultado se perdeu)
 	o.mu.Lock()
 	o.pending["cli-x"] = "BTCUSDT"
@@ -761,5 +763,254 @@ func TestReconcileAdoptsOrphanByClientOrderID(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ordem órfã não foi adotada pelo Reconcile: %+v", o.Orders())
+	}
+}
+
+// ── Fase 2A: intent durável pré-broker ──────────────────────────────────────
+
+// intentStoreMem é uma implementação em memória de IntentStore para testes
+// (o store.DB real é coberto em store/intent_test.go).
+type intentStoreMem struct {
+	mu       sync.Mutex
+	byID     map[string]store.Intent
+	failSave bool
+}
+
+func newIntentStoreMem() *intentStoreMem {
+	return &intentStoreMem{byID: make(map[string]store.Intent)}
+}
+
+func (m *intentStoreMem) SaveIntent(i store.Intent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failSave {
+		return errors.New("disco cheio (simulado)")
+	}
+	m.byID[i.ClientOrderID] = i
+	return nil
+}
+
+func (m *intentStoreMem) UpdateIntentStatus(id string, status store.IntentStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.byID[id]
+	if !ok {
+		return fmt.Errorf("intent %q não existe", id)
+	}
+	it.Status = status
+	m.byID[id] = it
+	return nil
+}
+
+func (m *intentStoreMem) PendingIntents() ([]store.Intent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []store.Intent
+	for _, it := range m.byID {
+		if it.Pending() {
+			out = append(out, it)
+		}
+	}
+	return out, nil
+}
+
+func (m *intentStoreMem) get(id string) (store.Intent, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.byID[id]
+	return it, ok
+}
+
+func TestPlaceOrderPersistsIntentBeforeBroker(t *testing.T) {
+	b := &fakeBroker{}
+	is := newIntentStoreMem()
+	var events []event.Event
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil }, WithIntentStore(is))
+
+	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("1"), Price: d("50000"), ClientOrderID: "fase2a-1",
+	})
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	if ord.ID == "" {
+		t.Fatal("ordem não criada")
+	}
+	// O intent existe e foi avançado para 'submitted'.
+	it, ok := is.get("fase2a-1")
+	if !ok {
+		t.Fatal("intent não persistido")
+	}
+	if it.Status != store.IntentSubmitted {
+		t.Errorf("intent status = %q, esperava submitted", it.Status)
+	}
+	if it.Symbol != "BTCUSDT" || !it.Quantity.Equal(d("1")) || it.Side != domain.SideBuy {
+		t.Errorf("intent com request errado: %+v", it)
+	}
+}
+
+func TestPlaceOrderDoesNotSendWhenIntentSaveFails(t *testing.T) {
+	// Fase 1 falha → a ordem NUNCA chega ao broker (sem ordem fantasma).
+	b := &fakeBroker{}
+	is := newIntentStoreMem()
+	is.failSave = true
+	o := New(b, func(event.Event) error { return nil }, WithIntentStore(is))
+
+	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("1"), Price: d("50000"), ClientOrderID: "fase2a-fail",
+	})
+	if err == nil {
+		t.Fatal("falha de intent deveria falhar o PlaceOrder")
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("ordem enviada ao broker mesmo com intent falho: %d envios", len(b.placed))
+	}
+	// A chave é liberada: o reenvio legítimo funciona.
+	is.failSave = false
+	if _, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("1"), Price: d("50000"), ClientOrderID: "fase2a-fail",
+	}); err != nil {
+		t.Fatalf("reenvio após liberar a trava falhou: %v", err)
+	}
+	if len(b.placed) != 1 {
+		t.Errorf("reenvio legítimo deveria enviar 1 ordem, veio %d", len(b.placed))
+	}
+}
+
+func TestPlaceOrderFailStopWhenOrderCreatedNotPersisted(t *testing.T) {
+	// Fase 3 falha de persistência → PlaceOrder retorna erro (fail-parado),
+	// e o intent fica 'pending' para o Reconcile adotar depois.
+	b := &fakeBroker{}
+	is := newIntentStoreMem()
+	o := New(b, func(event.Event) error { return errors.New("sqlite falhou") }, WithIntentStore(is))
+
+	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("1"), Price: d("50000"), ClientOrderID: "fase2a-pend",
+	})
+	if err == nil {
+		t.Fatal("OrderCreated não persistido deveria falhar o PlaceOrder")
+	}
+	// O intent permanece 'pending' → a próxima reconciliação adota.
+	it, _ := is.get("fase2a-pend")
+	if it.Status != store.IntentPending {
+		t.Errorf("intent status = %q, esperava pending (âncora da recuperação)", it.Status)
+	}
+}
+
+func TestPlaceOrderSagaMarksIntentFailed(t *testing.T) {
+	// Broker falha E confirma que a ordem não existe → intent 'failed'.
+	b := &sagaBroker{failPlaceOrder: true}
+	is := newIntentStoreMem()
+	o := New(b, func(event.Event) error { return nil }, WithIntentStore(is))
+
+	req := exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket,
+		Quantity: d("1"), ClientOrderID: "fase2a-failed",
+	}
+	if _, err := o.PlaceOrder(context.Background(), req); err == nil {
+		t.Fatal("falha real deveria ser reportada")
+	}
+	it, _ := is.get("fase2a-failed")
+	if it.Status != store.IntentFailed {
+		t.Errorf("intent status = %q, esperava failed", it.Status)
+	}
+}
+
+func TestReconcileAdoptsOrphanViaIntentStore(t *testing.T) {
+	// Crash window: intent 'pending' persistido + ordem existente na exchange
+	// (sem OrderCreated no rastro) → Reconcile adota + emite + marca submitted.
+	b := &recoverBroker{found: domain.Order{
+		ID: "orphan-intent", ClientOrderID: "cli-orphan", Symbol: "BTCUSDT", Exchange: "binance",
+		Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("100"), Status: domain.OrderNew,
+	}}
+	is := newIntentStoreMem()
+	var events []event.Event
+	o := New(b, func(e event.Event) error { events = append(events, e); return nil }, WithIntentStore(is))
+
+	// Simula o intent deixado pelo crash (nada em memória — só o disco).
+	_ = is.SaveIntent(store.Intent{
+		ClientOrderID: "cli-orphan", Symbol: "BTCUSDT", Side: domain.SideBuy,
+		Type: domain.OrderLimit, Price: d("100"), Quantity: d("1"),
+		Status: store.IntentPending, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+
+	if err := o.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	found := false
+	for _, ord := range o.Orders() {
+		if ord.ID == "orphan-intent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ordem órfã não adotada pelo Reconcile via intent: %+v", o.Orders())
+	}
+	// OrderCreated emitido durante a adoção (o rastro estava sem ele).
+	created := false
+	for _, ev := range events {
+		if ev.Type == event.OrderCreated {
+			created = true
+		}
+	}
+	if !created {
+		t.Errorf("adoção deveria emitir OrderCreated, eventos: %+v", events)
+	}
+	// Intent avançado para 'submitted'.
+	it, _ := is.get("cli-orphan")
+	if it.Status != store.IntentSubmitted {
+		t.Errorf("intent status = %q, esperava submitted", it.Status)
+	}
+}
+
+func TestReconcileMarksIntentFailedWhenOrderAbsent(t *testing.T) {
+	// Intent 'pending' cuja ordem NÃO existe na exchange → Reconcile marca
+	// 'failed' (nenhuma adoção, nenhum evento).
+	b := &recoverBroker{} // found vazio = não existe
+	is := newIntentStoreMem()
+	o := New(b, func(event.Event) error { return nil }, WithIntentStore(is))
+
+	_ = is.SaveIntent(store.Intent{
+		ClientOrderID: "cli-fantasma", Symbol: "BTCUSDT", Side: domain.SideBuy,
+		Type: domain.OrderMarket, Quantity: d("1"),
+		Status: store.IntentPending, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+
+	if err := o.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	it, _ := is.get("cli-fantasma")
+	if it.Status != store.IntentFailed {
+		t.Errorf("intent status = %q, esperava failed", it.Status)
+	}
+	if len(o.Orders()) != 0 {
+		t.Errorf("ordem inexistente não deveria ser adotada: %+v", o.Orders())
+	}
+}
+
+func TestApplyOrderUpdateMarksIntentDone(t *testing.T) {
+	// Ordem atinge estado terminal → intent 'done' (Reconcile para de varrer).
+	b := &fakeBroker{}
+	is := newIntentStoreMem()
+	o := New(b, func(event.Event) error { return nil }, WithIntentStore(is))
+
+	// Registra intent 'submitted' + ordem em memória.
+	_ = is.SaveIntent(store.Intent{
+		ClientOrderID: "cli-done", Symbol: "BTCUSDT", Side: domain.SideBuy,
+		Type: domain.OrderMarket, Quantity: d("1"),
+		Status: store.IntentSubmitted, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+	o.ApplyOrderUpdate(domain.Order{
+		ID: "o-done", ClientOrderID: "cli-done", Symbol: "BTCUSDT", Side: domain.SideBuy,
+		Type: domain.OrderMarket, Quantity: d("1"), Status: domain.OrderFilled, FilledQty: d("1"),
+	})
+
+	it, _ := is.get("cli-done")
+	if it.Status != store.IntentDone {
+		t.Errorf("intent status = %q, esperava done após terminal", it.Status)
 	}
 }
