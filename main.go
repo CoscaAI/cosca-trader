@@ -214,6 +214,18 @@ func main() {
 		log.Printf("COSCA TRADER — modo observação (sem credenciais; defina BINANCE_API_KEY/BINANCE_API_SECRET para executar)")
 	}
 
+	// Fase 3A — MarkPrice vivo: os ticks de mercado (reais OU sintéticos)
+	// alimentam o PnL não realizado das posições. Vale para todo modo de
+	// execução (paper com DemoFeed inclui — o tick alimenta o mark igual).
+	// O mark é market data: falha de persistência nunca derruba o sistema.
+	if omsEngine != nil {
+		e.Bus.Subscribe(event.MarketTick, func(ev event.Event) {
+			if tick, ok := ev.Payload.(domain.Tick); ok {
+				omsEngine.ApplyMarkPrice(tick.Symbol, tick.Exchange, decimal.NewFromFloat(tick.Price))
+			}
+		})
+	}
+
 	// Replay + reconciliação iniciais valem para PAPER e para Binance: no
 	// papel o Reconcile adota ordens de intents órfãs consultando o próprio
 	// broker simulado.

@@ -65,6 +65,7 @@ type OMS struct {
 	kill         bool                        // kill switch local (COSCA_TRADER_KILL=1)
 	maxOrderUSDT decimal.Decimal             // limite de notional por ordem (P1-1)
 	stopLossPct  decimal.Decimal             // stop-loss automático por posição (P1-2)
+	lastMarkEmit map[string]time.Time        // rate limit do PositionUpdated de mark (1x/s por posição)
 }
 
 // Option configura o OMS no New.
@@ -107,6 +108,7 @@ func New(broker exchange.Broker, emit func(event.Event) error, opts ...Option) *
 		ledger:       ledger.New(),
 		seenTrades:   make(map[string]struct{}),
 		maxOrderUSDT: decimal.Zero, // permissivo como biblioteca; main.go impõe 1000
+		lastMarkEmit: make(map[string]time.Time),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -536,6 +538,49 @@ func (o *OMS) ApplyBalance(b domain.Balance) {
 	o.mu.Unlock()
 	if err := o.emitEvent(event.Event{Type: event.BalanceUpdated, Source: "oms", Payload: b}); err != nil {
 		log.Printf("⚠ oms: persistência de BalanceUpdated falhou: %v", err)
+	}
+}
+
+// ApplyMarkPrice atualiza o MarkPrice da posição (Fase 3A) a partir do market
+// data — é o que torna o PnL NÃO realizado real na tela. O mark NUNCA é dinheiro
+// de liquidação (é mercado), então: converte float→decimal na fronteira (quem
+// alimenta), e falha de persistência loga e segue — nunca falha-parado num tick.
+//
+// Não emite a cada tick: há um rate limit interno de 1 PositionUpdated por
+// segundo por posição (map de último emit), para não inundar o rastro sem
+// valor. Mudança de preço abaixo da relevância (igual ao mark atual) também
+// não emite.
+func (o *OMS) ApplyMarkPrice(symbol, exchange string, mark decimal.Decimal) {
+	if mark.Sign() <= 0 {
+		return // preço inválido nunca toca o estado monetário
+	}
+	key := posKey(symbol, exchange)
+	now := time.Now()
+
+	o.mu.Lock()
+	pos := o.positions[key]
+	if pos == nil || !pos.IsOpen() {
+		o.mu.Unlock()
+		return
+	}
+	if pos.MarkPrice.Equal(mark) {
+		o.mu.Unlock()
+		return
+	}
+	// O mark SEMPRE atualiza (o /positions lê o estado, o PnL fica fresco);
+	// a EMISSÃO é que é rate-limita a 1x/s por posição.
+	pos.MarkPrice = mark
+	pos.UpdatedAt = now
+	if last, ok := o.lastMarkEmit[key]; ok && now.Sub(last) < time.Second {
+		o.mu.Unlock()
+		return
+	}
+	o.lastMarkEmit[key] = now
+	snap := *pos
+	o.mu.Unlock()
+
+	if err := o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms:mark", Payload: snap}); err != nil {
+		log.Printf("⚠ oms: persistência de PositionUpdated (mark) falhou: %v", err)
 	}
 }
 

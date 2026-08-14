@@ -10,6 +10,9 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/shopspring/decimal"
+
+	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
@@ -124,13 +127,15 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec api
 		}
 	}))
 
-	// /positions — posições abertas (sensível).
+	// /positions — posições abertas (sensível). Desde a Fase 3A o JSON inclui o
+	// PnL NÃO realizado (unrealized_pnl) e o percentual em relação ao notional
+	// de entrada — calculados na fronteira de view usando o MarkPrice vivo.
 	mux.HandleFunc("/positions", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		if o == nil {
 			writeJSON(w, []any{})
 			return
 		}
-		writeJSON(w, o.Positions())
+		writeJSON(w, positionViews(o.Positions()))
 	}))
 
 	// /balances — saldos (sensível).
@@ -214,4 +219,32 @@ func authorized(r *http.Request, token string) bool {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// positionView é a representação HTTP de uma posição (Fase 3A): embrulha a
+// Position do domínio e acrescenta o PnL não realizado calculado no mark. O
+// domínio permanece intacto — a view computa na fronteira de apresentação.
+type positionView struct {
+	domain.Position
+	UnrealizedPnL    decimal.Decimal `json:"unrealized_pnl"`
+	UnrealizedPnLPct decimal.Decimal `json:"unrealized_pnl_pct"`
+}
+
+// positionViews projeta posições do OMS em views com PnL não realizado.
+// Sem mark alimentado (MarkPrice zero) o PnL não realizado é zero (e o pct
+// zero) — nunca inventa valor no caminho de dinheiro. O pct é relativo ao
+// notional de entrada (avg_entry_price × quantity).
+func positionViews(positions []domain.Position) []positionView {
+	out := make([]positionView, 0, len(positions))
+	for _, p := range positions {
+		v := positionView{Position: p}
+		if p.MarkPrice.Sign() > 0 {
+			v.UnrealizedPnL = p.UnrealizedPnLAt(p.MarkPrice)
+			if notional := p.AvgEntryPrice.Mul(p.Quantity); notional.Sign() > 0 {
+				v.UnrealizedPnLPct = v.UnrealizedPnL.Div(notional).Mul(decimal.NewFromInt(100))
+			}
+		}
+		out = append(out, v)
+	}
+	return out
 }

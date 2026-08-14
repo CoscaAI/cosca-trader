@@ -256,6 +256,74 @@ func TestApplyBalance(t *testing.T) {
 	}
 }
 
+// ── Fase 3A: MarkPrice vivo (PnL não realizado) ─────────────────────────────
+
+func TestApplyMarkPriceUpdatesPositionAndEmits(t *testing.T) {
+	var events []event.Event
+	o := New(&fakeBroker{}, func(e event.Event) error { events = append(events, e); return nil })
+	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
+	events = nil
+
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("120"))
+
+	pos, _ := o.Position("BTCUSDT", "binance")
+	if !pos.MarkPrice.Equal(d("120")) {
+		t.Errorf("MarkPrice = %v, esperava 120", pos.MarkPrice)
+	}
+	// PnL não realizado = (120 - 100) × 2 = 40.
+	if !pos.UnrealizedPnLAt(pos.MarkPrice).Equal(d("40")) {
+		t.Errorf("PnL não realizado = %v, esperava 40", pos.UnrealizedPnLAt(pos.MarkPrice))
+	}
+	if len(events) != 1 || events[0].Type != event.PositionUpdated {
+		t.Fatalf("esperava 1 PositionUpdated, veio %+v", events)
+	}
+}
+
+func TestApplyMarkPriceIgnoresNonOpenAndStale(t *testing.T) {
+	var events []event.Event
+	o := New(&fakeBroker{}, func(e event.Event) error { events = append(events, e); return nil })
+
+	// Sem posição → no-op.
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("120"))
+	// Posição fechada (qty zero) → no-op.
+	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
+	o.ApplyTrade(domain.Trade{ID: "t2", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideSell, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
+	events = nil
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("120"))
+	if len(events) != 0 {
+		t.Errorf("posição fechada não deveria emitir, veio %+v", events)
+	}
+}
+
+func TestApplyMarkPriceRateLimitsEmission(t *testing.T) {
+	var events []event.Event
+	o := New(&fakeBroker{}, func(e event.Event) error { events = append(events, e); return nil })
+	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
+	events = nil
+
+	// Vários ticks no mesmo segundo → no máximo 1 PositionUpdated.
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("101"))
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("102"))
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("103"))
+
+	if len(events) != 1 {
+		t.Errorf("rate limit quebrado: %d PositionUpdated, esperava 1", len(events))
+	}
+	if got := len(events); got > 0 {
+		// mesmo preço do último emit não reemite (sem mudança relevante).
+		o.ApplyMarkPrice("BTCUSDT", "binance", d("103"))
+		if len(events) != 1 {
+			t.Errorf("preço inalterado deveria silenciar, veio %d eventos", len(events))
+		}
+	}
+	// Preço não positivo nunca toca o estado.
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("0"))
+	pos, _ := o.Position("BTCUSDT", "binance")
+	if !pos.MarkPrice.Equal(d("103")) {
+		t.Errorf("preço inválido alterou o mark: %v", pos.MarkPrice)
+	}
+}
+
 func TestReplayReconstructsState(t *testing.T) {
 	var emitted []event.Event
 	o := New(&fakeBroker{}, func(e event.Event) error { emitted = append(emitted, e); return nil })

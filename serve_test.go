@@ -3,18 +3,39 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 
+	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
+	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
+
+// fakeHTTPBroker é um broker inerte para exercitar o roteador HTTP do OMS.
+type fakeHTTPBroker struct{}
+
+func (fakeHTTPBroker) PlaceOrder(_ context.Context, _ exchange.OrderRequest) (domain.Order, error) {
+	return domain.Order{}, nil
+}
+func (fakeHTTPBroker) CancelOrder(_ context.Context, _, _ string) error     { return nil }
+func (fakeHTTPBroker) Balances(_ context.Context) ([]domain.Balance, error) { return nil, nil }
+func (fakeHTTPBroker) OpenOrders(_ context.Context, _ string) ([]domain.Order, error) {
+	return nil, nil
+}
+func (fakeHTTPBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
+
+// d constrói um decimal exato (dinheiro nunca é float no caminho de teste).
+func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
 func newTestMux(t *testing.T, sec apiSecurity) *http.ServeMux {
 	t.Helper()
@@ -111,6 +132,64 @@ func TestNoOriginRequestPasses(t *testing.T) {
 	rec := doGET(mux, "/orders", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 		t.Fatalf("request mesmo-origin (sem Origin) não deveria ser bloqueado, veio %d", rec.Code)
+	}
+}
+
+func TestPositionViewComputesUnrealizedPnL(t *testing.T) {
+	pos := domain.Position{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
+		Quantity: d("2"), AvgEntryPrice: d("100"), MarkPrice: d("120"),
+	}
+	views := positionViews([]domain.Position{pos})
+	if len(views) != 1 {
+		t.Fatalf("esperava 1 view, veio %d", len(views))
+	}
+	if !views[0].UnrealizedPnL.Equal(d("40")) {
+		t.Errorf("unrealized_pnl = %v, esperava 40", views[0].UnrealizedPnL)
+	}
+	// pct = 40 / (100×2) × 100 = 20%.
+	if !views[0].UnrealizedPnLPct.Equal(d("20")) {
+		t.Errorf("unrealized_pnl_pct = %v, esperava 20", views[0].UnrealizedPnLPct)
+	}
+	// Short: (entry - mark) × qty.
+	views = positionViews([]domain.Position{{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideSell,
+		Quantity: d("2"), AvgEntryPrice: d("100"), MarkPrice: d("90"),
+	}})
+	if !views[0].UnrealizedPnL.Equal(d("20")) {
+		t.Errorf("short unrealized_pnl = %v, esperava 20", views[0].UnrealizedPnL)
+	}
+	// Sem mark (zero) → PnL não realizado zero, pct zero.
+	views = positionViews([]domain.Position{{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
+		Quantity: d("2"), AvgEntryPrice: d("100"),
+	}})
+	if !views[0].UnrealizedPnL.IsZero() || !views[0].UnrealizedPnLPct.IsZero() {
+		t.Errorf("sem mark deveria zerar pnl: %+v", views[0])
+	}
+}
+
+func TestPositionsEndpointIncludesUnrealizedPnL(t *testing.T) {
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	omsEngine := oms.New(&fakeHTTPBroker{}, func(event.Event) error { return nil })
+	omsEngine.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
+	omsEngine.ApplyMarkPrice("BTCUSDT", "binance", d("120"))
+	mux := newMux(e, omsEngine, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	rec := doGET(mux, "/positions", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/positions deveria ser 200, veio %d", rec.Code)
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/positions inválido: %v", err)
+	}
+	if len(body) != 1 {
+		t.Fatalf("esperava 1 posição, veio %d", len(body))
+	}
+	if body[0]["unrealized_pnl"] == nil || body[0]["unrealized_pnl_pct"] == nil {
+		t.Errorf("unrealized_pnl/pct ausentes no /positions: %+v", body[0])
 	}
 }
 
