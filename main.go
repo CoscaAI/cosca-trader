@@ -534,7 +534,7 @@ func main() {
 		}()
 	}
 
-	serve(e, omsEngine, paperBroker, riskMgr, shadowMonitor, *port, apiSecurity{
+	serve(e, omsEngine, paperBroker, riskMgr, shadowMonitor, macroRadar, *port, apiSecurity{
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	}, mode)
@@ -680,7 +680,7 @@ func runShadow(symbol, interval, strategyName, port string, demo bool, e *engine
 	*shadowMonitor = monitor
 	sec := apiSecurity{token: os.Getenv("COSCA_TRADER_TOKEN")}
 	go func() {
-		serve(e, nil, nil, nil, monitor, port, sec, "shadow")
+		serve(e, nil, nil, nil, monitor, nil, port, sec, "shadow")
 	}()
 
 	if err := md.Start(ctx); err != nil {

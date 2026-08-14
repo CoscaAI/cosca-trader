@@ -392,6 +392,58 @@ table.compact td {
   color: #ff6b6b;
 }
 
+/* ── radar macro (L287/L288): mercados globais + divergência ────────────── */
+
+.markets,
+.convergence {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.mini-table th {
+  text-align: left;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.mini-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.mini-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.div-signal {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.div-signal p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.warn {
+  color: var(--warn);
+}
+
 /* ── formulário de ordens ───────────────────────────────────────────────── */
 
 .order-form {

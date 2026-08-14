@@ -5,16 +5,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/shopspring/decimal"
 
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/marketindex"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/risk"
@@ -28,8 +31,8 @@ type apiSecurity struct {
 	allowedOrigins []string
 }
 
-func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, port string, sec apiSecurity, mode string) {
-	mux := newMux(e, o, pb, rm, conv, port, sec, mode)
+func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, port string, sec apiSecurity, mode string) {
+	mux := newMux(e, o, pb, rm, conv, radar, port, sec, mode)
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
 }
@@ -37,7 +40,7 @@ func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, con
 // newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
 // sem subir o listener. /health é público; todos os demais endpoints passam
 // pela política de segurança (origem + token).
-func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, port string, sec apiSecurity, mode string) *http.ServeMux {
+func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, port string, sec apiSecurity, mode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /health — estado do core. Público (liveness, sem dados sensíveis).
@@ -223,6 +226,32 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 			return
 		}
 		writeJSON(w, conv.State())
+	}))
+
+	// /markets — o radar GLOBAL (proteção macro L287 + divergência L288):
+	// cotações de S&P/NASDAQ/VIX/ouro/dólar, o regime risk-on/off e a
+	// divergência com o cripto (S&P caiu/BTC não reagiu → sinal).
+	mux.HandleFunc("/markets", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if radar == nil {
+			http.Error(w, "radar global não ativo", http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		snap, err := radar.Fetch(ctx)
+		if err != nil {
+			http.Error(w, "radar indisponível: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		// Divergência com o cripto (BTC 10d) — se o Klines estiver acessível.
+		sig := marketindex.AnalyzeDivergence(snap, 0, marketindex.DefaultDivergenceConfig())
+		writeJSON(w, map[string]any{
+			"regime":     snap.Regime,
+			"signal":     snap.Signal,
+			"quotes":     snap.Quotes,
+			"fetched_at": snap.FetchedAt,
+			"divergence": sig,
+		})
 	}))
 
 	return mux

@@ -19,7 +19,9 @@ import type {
   BacktestReport,
   Balance,
   CandlePayload,
+  ConvergenceState,
   Health,
+  MarketsSnapshot,
   Order,
   OrderRequest,
   PaperSummary,
@@ -393,6 +395,105 @@ function ScienceCard({ report }: { report: BacktestReport | null }) {
   );
 }
 
+// MarketsCard — o radar macro (L287/L288): regime global risk-on/off, cotações
+// de S&P/NASDAQ/VIX/ouro/dólar e a divergência com o cripto (sinal de entrada
+// seguindo a tendência global).
+function MarketsCard({ markets }: { markets: MarketsSnapshot | null }) {
+  if (!markets) {
+    return <p className="empty">radar global indisponível (rode o core com acesso à rede)</p>;
+  }
+  const div = markets.divergence;
+  const regimeCls =
+    markets.regime === "risk-off" ? "neg" : markets.regime === "risk-on" ? "pos" : "warn";
+  const actCls = div.action === "buy" ? "pos" : div.action === "sell" ? "neg" : "";
+  return (
+    <div className="markets">
+      <div className="science-verdict">
+        <span className={`v ${regimeCls}`}>
+          {markets.regime === "risk-on" ? "RISK-ON" : markets.regime === "risk-off" ? "RISK-OFF" : markets.regime}
+        </span>
+        <span className="k">{markets.signal}</span>
+      </div>
+      <table className="mini-table">
+        <thead>
+          <tr>
+            <th>Ativo</th>
+            <th>Preço</th>
+            <th>5d</th>
+            <th>10d</th>
+          </tr>
+        </thead>
+        <tbody>
+          {markets.quotes.map((q) => (
+            <tr key={q.symbol}>
+              <td>{q.name}</td>
+              <td className="num">{fmtMoney(q.price, 2)}</td>
+              <td className={`num ${q.change_5d_pct >= 0 ? "pos" : "neg"}`}>
+                {q.change_5d_pct.toFixed(2)}%
+              </td>
+              <td className={`num ${q.change_10d_pct >= 0 ? "pos" : "neg"}`}>
+                {q.change_10d_pct.toFixed(2)}%
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {div.action !== "hold" && (
+        <div className={`science-line div-signal ${actCls}`}>
+          <span className="v">
+            {div.action === "buy" ? "🟢 SINAL DE ALTA" : "🔴 SINAL DE QUEDA"}
+          </span>{" "}
+          <span className="k">força {div.strength.toFixed(2)}</span>
+          <p>{div.reason}</p>
+        </div>
+      )}
+      {div.action === "hold" && (
+        <p className="empty">{div.reason}</p>
+      )}
+    </div>
+  );
+}
+
+// ConvergenceCard — o laboratório vivo (L281): a previsão da estratégia está
+// convergindo com o mercado? z-score, acerto observado vs esperado, divergência.
+function ConvergenceCard({ conv }: { conv: ConvergenceState | null }) {
+  if (!conv) {
+    return <p className="empty">laboratório vivo inativo (rode o core com --shadow)</p>;
+  }
+  const cls = conv.diverged ? "neg" : "pos";
+  return (
+    <div className="convergence">
+      <div className="science-verdict">
+        <span className={`v ${cls}`}>
+          {conv.diverged ? "⚠ DIVERGENTE — regime mudou" : "CONVERGINDO"}
+        </span>
+        <span className="k">
+          {conv.strategy} · z={conv.z_score.toFixed(2)} · {conv.resolved} previsões
+        </span>
+      </div>
+      <div className="metrics-grid">
+        <div className="metric">
+          <span className="k">acerto observado</span>
+          <span className="v">{(conv.observed_hit * 100).toFixed(0)}%</span>
+        </div>
+        <div className="metric">
+          <span className="k">acerto esperado</span>
+          <span className="v">{(conv.expected_hit * 100).toFixed(0)}%</span>
+        </div>
+        <div className="metric">
+          <span className="k">pendentes</span>
+          <span className="v">{conv.pending}</span>
+        </div>
+        <div className="metric">
+          <span className="k">reajustes</span>
+          <span className="v">{conv.readjustments}</span>
+        </div>
+      </div>
+      <p className="empty">{conv.last_reason}</p>
+    </div>
+  );
+}
+
 function OrdersPanel({
   client,
   orders,
@@ -549,6 +650,8 @@ export default function App() {
   const [paper, setPaper] = useState<PaperSummary | null>(null);
   const [risk, setRisk] = useState<RiskState | null>(null);
   const [science, setScience] = useState<BacktestReport | null>(null);
+  const [markets, setMarkets] = useState<MarketsSnapshot | null>(null);
+  const [convergence, setConvergence] = useState<ConvergenceState | null>(null);
   const [candles, setCandles] = useState<CandlePayload[]>([]);
   const [lastPrice, setLastPrice] = useState<TickPayload | null>(null);
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
@@ -593,6 +696,16 @@ export default function App() {
       setScience(await client.backtest("BTCUSDT"));
     } catch {
       setScience(null);
+    }
+    try {
+      setMarkets(await client.markets());
+    } catch {
+      setMarkets(null);
+    }
+    try {
+      setConvergence(await client.convergence());
+    } catch {
+      setConvergence(null);
     }
   }, [client, token]);
 
@@ -722,6 +835,16 @@ export default function App() {
         <section className="card science-card">
           <h2>Ciência — laudo estatístico</h2>
           <ScienceCard report={science} />
+        </section>
+
+        <section className="card markets-card">
+          <h2>Mercados globais — radar macro</h2>
+          <MarketsCard markets={markets} />
+        </section>
+
+        <section className="card">
+          <h2>Convergência — laboratório vivo</h2>
+          <ConvergenceCard conv={convergence} />
         </section>
 
         <section className="card orders-card">

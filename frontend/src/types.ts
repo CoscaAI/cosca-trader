@@ -231,3 +231,46 @@ export type OrderRequest = {
   price?: string;
   stop_price?: string;
 };
+
+// ── Proteção macro (L287/L288): mercados globais + divergência ─────────────
+
+export type MarketQuote = {
+  symbol: string;
+  name: string;
+  price: number;
+  change_5d_pct: number;
+  change_10d_pct: number;
+  fetched_at: string;
+};
+
+export type DivergenceSignal = {
+  action: "buy" | "sell" | "hold";
+  strength: number;
+  reason: string;
+  global_change_pct: number;
+  crypto_change_pct: number;
+  generated_at: string;
+};
+
+export type MarketsSnapshot = {
+  regime: "risk-on" | "risk-off" | "cautela" | string;
+  signal: string;
+  quotes: MarketQuote[];
+  fetched_at: string;
+  divergence: DivergenceSignal;
+};
+
+export type ConvergenceState = {
+  strategy: string;
+  expected_hit: number;
+  observed_hit: number;
+  resolved: number;
+  pending: number;
+  z_score: number;
+  converging: boolean;
+  diverged: boolean;
+  last_check: string;
+  diverged_at?: string;
+  readjustments: number;
+  last_reason: string;
+};

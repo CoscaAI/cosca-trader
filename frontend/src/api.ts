@@ -5,7 +5,9 @@
 import type {
   BacktestReport,
   Balance,
+  ConvergenceState,
   Health,
+  MarketsSnapshot,
   Order,
   OrderRequest,
   PaperSummary,
@@ -49,6 +51,14 @@ export class CoreClient {
 
   async risk(): Promise<RiskState> {
     return this.get<RiskState>("/risk");
+  }
+
+  async markets(): Promise<MarketsSnapshot> {
+    return this.get<MarketsSnapshot>("/markets");
+  }
+
+  async convergence(): Promise<ConvergenceState> {
+    return this.get<ConvergenceState>("/convergence");
   }
 
   async backtest(symbol: string): Promise<BacktestReport> {

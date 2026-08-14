@@ -574,3 +574,21 @@ go run . --macro --symbol BTCUSDT --fetch-interval 1d --fetch-bars 10
    (> 15min) → NÃO sinaliza. O sistema prefere não operar a operar às cegas.
 3. O regime alimenta o risk manager: em risk-off, a exposição cai pela metade
    (a proteção da L287 continua valendo em cima da divergência).
+
+### Painel completo (o que o Don vê)
+
+O frontend agora cobre TODO o conhecimento aplicado — nada ficou de fora:
+
+| Card | O que mostra |
+|------|-------------|
+| Gráfico | candlestick ao vivo (SSE) |
+| Posições / Saldos | operação corrente com PnL não realizado |
+| Paper | equity, PnL total, capital |
+| Risco | drawdown, exposição, trading halted |
+| **Ciência** | win rate, PF, Sharpe, Monte Carlo, p-value, walk-forward, edge |
+| **Mercados globais** | radar S&P/NASDAQ/VIX/ouro/dólar + regime + sinal de divergência |
+| **Convergência** | laboratório vivo: z-score, acerto observado vs esperado |
+| Ordens / Timeline | operação e rastro |
+
+Endpoints novos: `/markets` (radar + divergência) e `/convergence` (laboratório
+vivo — ativo com `--shadow`).
