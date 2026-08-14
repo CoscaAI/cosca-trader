@@ -26,6 +26,12 @@ function coreProxy(): ProxyOptions {
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Porta FIXA e EXPLÍCITA do painel do trader: 5273.
+    // O cosca-code vive na 5173 — nunca conflitar. strictPort=true: se a
+    // 5273 estiver ocupada, o Vite FALHA em vez de "pular" para outra porta
+    // silenciosamente (o Don pediu: frontend em porta própria, sem sorte).
+    port: 5273,
+    strictPort: true,
     proxy: {
       "/health": coreProxy(),
       "/events": coreProxy(),
