@@ -106,14 +106,14 @@ func TestBreakoutUptrend(t *testing.T) {
 
 func TestRegistryNames(t *testing.T) {
 	names := Names()
-	if len(names) != 4 {
-		t.Fatalf("esperava 4 estratégias registradas, got %d: %v", len(names), names)
+	if len(names) != 5 {
+		t.Fatalf("esperava 5 estratégias registradas, got %d: %v", len(names), names)
 	}
 	found := map[string]bool{}
 	for _, n := range names {
 		found[n] = true
 	}
-	for _, want := range []string{"ema-cross", "momentum", "rsi-reversion", "breakout"} {
+	for _, want := range []string{"ema-cross", "momentum", "rsi-reversion", "breakout", "bb-reversion"} {
 		if !found[want] {
 			t.Fatalf("estratégia %s não registrada", want)
 		}
@@ -133,8 +133,8 @@ func TestScannerRanksStrategies(t *testing.T) {
 	gate := DefaultGate()
 	res := Scan(candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), gate, 300, 300, 42)
 
-	if len(res.Strategies) != 4 {
-		t.Fatalf("scanner deveria avaliar 4 estratégias, got %d", len(res.Strategies))
+	if len(res.Strategies) != 5 {
+		t.Fatalf("scanner deveria avaliar 5 estratégias, got %d", len(res.Strategies))
 	}
 	// Ranking deve estar ordenado (score decrescente).
 	for i := 1; i < len(res.Strategies); i++ {

@@ -129,6 +129,7 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 	entrySide := ""
 	held := 0
 	idx := 0
+	activeStop := decimal.Zero // stop-loss do trade aberto (do sinal de entrada)
 
 	finish := func(exit decimal.Decimal, reason string, barIdx int) {
 		gross := decimal.Zero
@@ -153,15 +154,37 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 		})
 		position = decimal.Zero
 		entry = decimal.Zero
+		activeStop = decimal.Zero
 		held = 0
 		_ = barIdx
 	}
 
 	for _, c := range candles {
+		closePx := decimal.NewFromFloat(c.Close)
+		lowPx := decimal.NewFromFloat(c.Low)
+		highPx := decimal.NewFromFloat(c.High)
+
+		// 1. STOP-LOSS primeiro (o preço pode ter varado o stop dentro da
+		// vela — executamos no stop, pessimista e conservador como a casa).
+		if position.Sign() > 0 && activeStop.Sign() > 0 {
+			stopped := false
+			exit := activeStop
+			if entrySide == "buy" && lowPx.LessThanOrEqual(activeStop) {
+				stopped = true
+			}
+			if entrySide == "sell" && highPx.GreaterThanOrEqual(activeStop) {
+				stopped = true
+			}
+			if stopped {
+				finish(exit, "stop", idx)
+			}
+		}
+
+		// 2. Sinais da estratégia.
 		for _, sig := range s.OnCandle(c) {
 			price := sig.Price
 			if price.Sign() <= 0 {
-				price = decimal.NewFromFloat(c.Close)
+				price = closePx
 			}
 			switch sig.Side {
 			case "buy":
@@ -172,6 +195,7 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 					fee := price.Mul(position).Mul(feePct)
 					equity = equity.Sub(fee)
 					held = 0
+					activeStop = sig.Stop // stop do sinal de entrada
 				}
 			case "sell":
 				if position.Sign() > 0 {
