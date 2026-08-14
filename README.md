@@ -25,9 +25,9 @@ CORE (Go) — headless, event-driven
 - **F0** — Fundação: event bus, event store, schema de domínio, rastro total. ✅
 - **F1** — Conectividade Binance + market data em tempo real (WebSocket). ✅
 - **F2** — OMS: ordens, fills, posições, saldos, book de ofertas. ✅
-- **F3** — Gráficos + indicadores (plugins).
+- **F3** — Gráficos + indicadores + painel de trading (frontend). ✅
 - **F4** — Risco (sizing, stop/target, drawdown) + opções.
-- **F5** — Estratégias + backtest + paper trading. (o **modo paper** já existe desde a Fase 2B)
+- **F5** — Estratégias + backtest + paper trading. (o **modo paper** já existe desde a Fase 2B; a Fase 3D deixou a **semente** da estratégia + backtest)
 - **F6** — Assistente IA cognitiva.
 - **F7** — B3 (MetaTrader5/API de corretora) + Coinbase/CoinEx + empacotamento enterprise.
 
@@ -44,7 +44,8 @@ internal/
   market/   Market Data Engine (exchange → eventos de mercado)
   oms/      Order Management System (ordens, posições, saldos, PnL)
   paper/    Paper trading engine (broker simulado + candles sintéticos)
-frontend/   React + Vite + TypeScript (desktop Wails)
+  strategy/ Estratégias (Fase 3D — semente do F5): EMA cross + backtest
+frontend/   React + Vite + TypeScript (desktop Wails) — painel de trading F3
 ```
 
 ## Rodar
@@ -121,6 +122,103 @@ O que acontece ao operar:
 | `COSCA_TRADER_PAPER_FEE_PCT` | `0.001` | Taxa por preenchimento (0.1%), debitada no ativo recebido. |
 | `COSCA_TRADER_PAPER_SLIPPAGE` | `0` | Deslizamento de preço de execução (ex.: `0.01` = 1%). |
 | `COSCA_TRADER_PAPER_SEED` | aleatório | Semente do feed de candles sintéticos — definir = demo reproduzível. |
+| `COSCA_TRADER_PAPER_LIMIT_FILL_FRACTION` | `0.5` | Fase 3B: fração da quantidade preenchida por avaliação de preço em ordens limit. `0.5` = metade por vez (fills parciais); `0` = all-or-nothing. Market é sempre all-or-nothing. |
+| `COSCA_TRADER_PAPER_FAST` | — | `1` = demo acelerada: velas sintéticas de 5s (a estratégia sinaliza em minutos, não em horas). Mesmo seed = mesmo random walk. |
+
+## Fase 3 — MarkPrice vivo, fills parciais, painel de trading e estratégia
+
+### 3A · MarkPrice vivo (PnL não realizado real)
+
+Antes da Fase 3A, `Position.MarkPrice` ficava em `0` — o `/positions` mostrava a
+posição, mas o PnL **não realizado** (o que o operador enxerga na tela) nunca
+era calculado. Agora:
+
+- O OMS ganhou `ApplyMarkPrice(symbol, exchange, mark)`: alimenta o `MarkPrice`
+  da posição a partir dos ticks de mercado e emite `PositionUpdated` (rate
+  limit: no máximo 1× por segundo por posição). O mark é **market data** — o
+  estado monetário de liquidação continua intocado.
+- `main.go` conecta `MarketTick` → `ApplyMarkPrice` em **todo** modo de
+  execução (paper com DemoFeed inclui — o tick alimenta o mark igual).
+- `/positions` agora devolve `unrealized_pnl` e `unrealized_pnl_pct`
+  calculados na fronteira de view com `UnrealizedPnLAt(mark)` (o domínio
+  permanece intacto). Sem mark alimentado, o PnL não realizado é `0`.
+
+### 3B · Fills parciais no paper broker
+
+O paper broker preenchia tudo-ou-nada. Desde a Fase 3B, ordens **limit
+grandes** preenchem em **múltiplos fills parciais** conforme o preço evolui:
+
+- A cada `SetPrice`, uma ordem limit favorável preenche uma **fração** da
+  quantidade original (`COSCA_TRADER_PAPER_LIMIT_FILL_FRACTION`, default
+  `0.5`) — cada fatia emite `TradeExecuted` e a ordem avança de
+  `new` → `partially_filled` → `filled`.
+- **Market permanece all-or-nothing** (igual corretora real).
+- Determinismo preservado: o fluxo de preços é o mesmo (seed + sequência
+  injetável); o desbloqueio usa exatamente o montante **reservado** no lock
+  (dinheiro exato, nunca aproximado por preço corrente).
+
+### 3C · Frontend — painel de trading real
+
+O frontend deixou de ser um health-check e virou o **painel de operação**
+(React + Vite + TypeScript estrito + `lightweight-charts`):
+
+- **Gráfico candlestick** ao vivo, alimentado pelo SSE `/events`
+  (`MarketTick` reflete o preço na vela em formação; `CandleClosed` fecha a vela).
+- **Topbar**: status do core, modo (paper/testnet/live), e o campo de **token**
+  Bearer (persistido em `localStorage`, enviado em todas as chamadas).
+- **Posições** (com PnL não realizado e %), **saldos** (livre/travado),
+  **ordens** (formulário market/limit + lista recente), **paper**
+  (capital/equity/PnL) e **timeline** compacta dos eventos (ordem/fill/posição).
+- O `vite.config.ts` **proxya** o core (o CORS fail-closed do core continua
+  fechado — o proxy remove o header `Origin`; a auth Bearer segue intacta).
+- Tipos estritos em `src/types.ts`; cliente tipado em `src/api.ts`.
+
+### 3D · Estratégia demonstrativa + backtest mínimo (semente do F5)
+
+Para o operador ver uma estratégia operar no paper:
+
+- `internal/strategy/`: interface `Strategy{ OnCandle(domain.Candle) []Signal; Name() }`
+  + **`ema-cross`** (EMA 9/21 no fechamento; compra quando a rápida cruza
+  acima da lenta, vende quando cruza abaixo; estado por símbolo).
+- No modo paper, `CandleClosed` → estratégia → `OMS.PlaceOrder` (market),
+  com limite de **1 ordem por sinal por direção** (sem spam). Eventos
+  `StrategyStarted` / `StrategySignal` / `StrategyStopped` (este emitido no
+  desligamento via handler de sinal).
+- **Backtest mínimo** (`--backtest`): roda a estratégia sobre candles sem
+  broker real e devolve PnL final + nº de trades (+ fees). Candles do rastro
+  persistido se houver; senão sintéticos seedáveis. É CLI-only — semente do F5.
+
+```bash
+# backtest (CLI, sem HTTP):
+go run . --backtest --symbol BTCUSDT
+
+# estratégia ema-cross no paper com demo acelerada (sinal em minutos):
+COSCA_TRADER_PAPER_FAST=1 COSCA_TRADER_PAPER_SEED=9 go run . --paper --strategy ema-cross
+
+# estratégia com candles reais da Binance:
+go run . --paper --binance --symbol BTCUSDT --interval 1m --strategy ema-cross
+```
+
+> A quantidade por sinal é `COSCA_TRADER_STRATEGY_QTY` (default `0.001` do
+> ativo base). A estratégia só opera no **modo paper** — nunca em live.
+
+### Como rodar o frontend com proxy
+
+```bash
+# 1. core no ar (modo paper de exemplo) com token:
+COSCA_TRADER_TOKEN=meu-token go run . --paper
+
+# 2. frontend (dev) — o proxy aponta para o core em 127.0.0.1:14126:
+cd frontend && npm install && npm run dev
+
+# 3. abra http://localhost:5173 e cole o token no campo da topbar.
+#    Porta do core diferente? aponte o proxy:
+#    COSCA_TRADER_CORE_URL=http://127.0.0.1:14127 npm run dev
+```
+
+O painel fala com o core **só via proxy** (mesma origem): o CORS fail-closed
+permanece fechado, e a autenticação Bearer é exigida nos endpoints sensíveis
+(painel mostra 401 sem token válido).
 
 ## Rastreamento de intent (Fase 2A — nunca mais ordem órfã)
 
