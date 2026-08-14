@@ -5,12 +5,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import GridLayout from "react-grid-layout";
-import { WidthProvider } from "react-grid-layout/legacy";
 
 // O @types do react-grid-layout está defasado (não reconhece props). O
-// GridLayout padrão (ESM) NÃO exporta WidthProvider — o subpath /legacy tem.
+// WidthProvider do /legacy era de outra versão e não media a largura real —
+// medimos NÓS MESMOS com ResizeObserver e passamos width explícito.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const Grid = WidthProvider(GridLayout) as React.ComponentType<any>;
+const Grid = GridLayout as unknown as React.ComponentType<any>;
 
 // Shape de um item do layout (x/y/w/h + mínimos) — o array do painel.
 type GridLayoutItem = {
@@ -739,6 +739,21 @@ export default function App() {
   const [timeframe, setTimeframe] = useState<string>("1h");
   const [chartSymbol, setChartSymbol] = useState<string>("BTCUSDT");
   const [layout, setLayout] = useState<GridLayoutItem[]>(() => loadLayout());
+  // Largura real do container (medida com ResizeObserver) — o grid usa ela,
+  // senão os cards amontoam no canto.
+  const gridMainRef = useRef<HTMLElement | null>(null);
+  const [gridWidth, setGridWidth] = useState(0);
+
+  // Mede a largura do container e re-mede ao redimensionar a janela.
+  useEffect(() => {
+    const el = gridMainRef.current;
+    if (!el) return;
+    const measure = () => setGridWidth(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Persiste o layout quando o Don reorganiza/redimensiona o painel.
   // Nota: o @types do react-grid-layout tipa onLayoutChange como (layout) =>
@@ -942,12 +957,13 @@ export default function App() {
         </div>
       </header>
 
-      <main className="grid-main">
+      <main className="grid-main" ref={gridMainRef as React.RefObject<HTMLElement>}>
         <Grid
           className="layout"
           layout={layout}
           cols={12}
           rowHeight={22}
+          width={gridWidth || undefined}
           margin={[12, 12]}
           containerPadding={[4, 4]}
           draggableHandle=".card-drag"

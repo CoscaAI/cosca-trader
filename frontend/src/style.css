@@ -283,12 +283,15 @@ td.mono {
 /* Container do layout arrastável — substitui o .grid estático */
 .grid-main {
   flex: 1;
+  width: 100%;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 14px 18px 24px;
 }
 
 .layout {
+  width: 100%;
   min-height: 600px;
 }
 
