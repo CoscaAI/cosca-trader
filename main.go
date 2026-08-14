@@ -32,6 +32,7 @@ func main() {
 	interval := flag.String("interval", "1m", "intervalo dos candles")
 	testnet := flag.Bool("testnet", false, "usar a sandbox da Binance (sem fundos reais)")
 	authFlag := flag.Bool("auth", false, "exigir COSCA_TRADER_TOKEN no startup (fail-fast)")
+	liveFlag := flag.Bool("live", false, "MODO PRODUÇÃO: conecta à Binance real (api.binance.com) — DINHEIRO REAL; exige COSCA_TRADER_TOKEN")
 	flag.Parse()
 
 	// Segurança P0-1: fail-closed. O token é OBRIGATÓRIO nos endpoints
@@ -81,8 +82,29 @@ func main() {
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_API_SECRET")
 	if apiKey != "" && apiSecret != "" {
-		tc := binance.NewTrading(apiKey, apiSecret, *testnet)
+		// P0-3: o default é SEGURO. Produção exige escolha explícita: flag
+		// --live OU env COSCA_TRADER_ENV=live. Sem isso, mesmo com chaves
+		// reais, o sistema NÃO toca em api.binance.com — força a sandbox.
+		live := *liveFlag || os.Getenv("COSCA_TRADER_ENV") == "live"
+		if *liveFlag && *testnet {
+			log.Fatal("conflito: --live e --testnet juntos — escolha um único ambiente")
+		}
+		env := binance.EnvTestnet
+		if live {
+			env = binance.EnvLive
+			if token == "" {
+				log.Fatal("fail-closed: modo live exige COSCA_TRADER_TOKEN — nunca operar dinheiro real sem autenticação")
+			}
+			log.Printf("⚠⚠ MODO PRODUÇÃO — conectando à Binance REAL (api.binance.com). DINHEIRO REAL EM JOGO.")
+		} else {
+			log.Printf("COSCA TRADER — modo SEGURO: forçando sandbox (testnet). Para produção use --live.")
+		}
+		tc := binance.NewTrading(apiKey, apiSecret, env)
 		omsEngine = oms.New(tc, e.Emit)
+
+		// Kill switch local (P0-3): parada de emergência — bloqueia novas
+		// ordens enquanto COSCA_TRADER_KILL=1.
+		omsEngine.SetKillSwitch(os.Getenv("COSCA_TRADER_KILL") == "1")
 
 		// Resiliência (event sourcing): reconstrói o estado a partir do rastro.
 		if db != nil {
@@ -126,7 +148,7 @@ func main() {
 				log.Printf("⚠ user stream encerrado: %v", err)
 			}
 		}()
-		log.Printf("COSCA TRADER — execução autenticada ativa (testnet=%v)", *testnet)
+		log.Printf("COSCA TRADER — execução autenticada ativa (env=%s, kill=%v)", env, omsEngine.KillSwitch())
 	} else {
 		log.Printf("COSCA TRADER — modo observação (sem credenciais; defina BINANCE_API_KEY/BINANCE_API_SECRET para executar)")
 	}

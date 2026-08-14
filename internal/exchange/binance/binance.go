@@ -19,6 +19,13 @@ import (
 
 const defaultWSURL = "wss://stream.binance.com:9443/ws"
 
+// Ambiente de execução (P0-3): modo SEGURO é sempre o default — conectar à
+// Binance real exige escolha explícita do operador (--live / COSCA_TRADER_ENV).
+const (
+	EnvTestnet = "testnet"
+	EnvLive    = "live"
+)
+
 // Client é o adapter Binance (market data + execução autenticada).
 type Client struct {
 	name     string
@@ -38,16 +45,28 @@ func New() *Client {
 }
 
 // NewTrading cria o adapter com credenciais para execução (ordens/conta).
-// testnet=true aponta para a sandbox (https://testnet.binance.vision).
-func NewTrading(apiKey, secret string, testnet bool) *Client {
+// env ∈ {EnvTestnet, EnvLive}. P0-3: o ambiente é EXPLÍCITO — o default de
+// todo o sistema é seguro; produção (api.binance.com) só é atingida quando o
+// operador escolhe EnvLive no startup.
+func NewTrading(apiKey, secret, env string) *Client {
 	c := New()
 	c.apiKey = apiKey
 	c.secret = secret
-	if testnet {
-		c.url = "wss://testnet.binance.vision/ws"
-		c.restBase = "https://testnet.binance.vision"
+	if env == EnvLive {
+		// api.binance.com já é o default de New() — nada a trocar.
+		return c
 	}
+	c.url = "wss://testnet.binance.vision/ws"
+	c.restBase = "https://testnet.binance.vision"
 	return c
+}
+
+// Env devolve o ambiente de execução do adapter (testnet | live).
+func (c *Client) Env() string {
+	if c.restBase == "https://api.binance.com" && c.url == defaultWSURL {
+		return EnvLive
+	}
+	return EnvTestnet
 }
 
 // TradingEnabled devolve se as credenciais de execução estão configuradas.

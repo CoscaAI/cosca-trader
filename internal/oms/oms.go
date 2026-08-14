@@ -32,6 +32,7 @@ var (
 	ErrInvalidOrder   = errors.New("ordem inválida")
 	ErrOrderNotFound  = errors.New("ordem não encontrada")
 	ErrDuplicateOrder = errors.New("client_order_id duplicado")
+	ErrKillSwitch     = errors.New("kill switch ativo: novas ordens bloqueadas")
 )
 
 // OMS é o motor de ordens/posições/saldos.
@@ -48,6 +49,7 @@ type OMS struct {
 	ledger      *ledger.Ledger              // double-entry (fees + PnL)
 	seenTrades  map[string]struct{}         // dedup de fills por Trade.ID
 	replaying   bool                        // true durante Replay (suprime emissão)
+	kill        bool                        // kill switch local (COSCA_TRADER_KILL=1)
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit.
@@ -65,7 +67,27 @@ func New(broker exchange.Broker, emit func(event.Event)) *OMS {
 	}
 }
 
+// SetKillSwitch liga/desliga o kill switch local. Quando ativo, PlaceOrder
+// (e PlaceStopLoss) recusam novas ordens. CancelOrder NÃO é bloqueado — em uma
+// emergência o operador precisa conseguir reduzir a exposição, nunca ficar
+// preso com a posição aberta.
+func (o *OMS) SetKillSwitch(active bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.kill = active
+}
+
+// KillSwitch devolve o estado atual do kill switch.
+func (o *OMS) KillSwitch() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.kill
+}
+
 // PlaceOrder valida, envia à exchange, registra e emite OrderCreated.
+//
+// P0-3: kill switch é verificado no topo — com COSCA_TRADER_KILL=1 nenhuma
+// nova ordem sai para o mercado.
 //
 // P0-2 (anti double-trade):
 //  1. A chave client_order_id é OBRIGATÓRIA — se o cliente não mandou, geramos
@@ -78,6 +100,9 @@ func New(broker exchange.Broker, emit func(event.Event)) *OMS {
 //     se a ordem foi aceita — adota se foi, reporta falha real se confirmado,
 //     e trava a chave se o estado seguir ambíguo.
 func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domain.Order, error) {
+	if o.KillSwitch() {
+		return nil, errors.Join(ErrKillSwitch, errors.New("COSCA_TRADER_KILL=1 — nenhuma nova ordem até desativar"))
+	}
 	if err := validateOrder(req); err != nil {
 		return nil, err
 	}

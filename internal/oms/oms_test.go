@@ -412,6 +412,29 @@ func (a *ambiguousBroker) OpenOrders(_ context.Context, _ string) ([]domain.Orde
 }
 func (a *ambiguousBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
 
+// ── P0-3: kill switch ──────────────────────────────────────────────────────
+
+func TestKillSwitchBlocksNewOrders(t *testing.T) {
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) {})
+	o.SetKillSwitch(true)
+
+	req := exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("50000"),
+	}
+	if _, err := o.PlaceOrder(context.Background(), req); !errors.Is(err, ErrKillSwitch) {
+		t.Errorf("esperava ErrKillSwitch com kill ativo, veio %v", err)
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("kill switch deveria impedir qualquer envio ao broker, veio %d", len(b.placed))
+	}
+
+	o.SetKillSwitch(false)
+	if _, err := o.PlaceOrder(context.Background(), req); err != nil {
+		t.Errorf("com kill desativado a ordem deveria passar: %v", err)
+	}
+}
+
 // ── P0-2: client_order_id obrigatório + saga de recuperação ────────────────
 
 func TestPlaceOrderAutoGeneratesClientOrderID(t *testing.T) {
