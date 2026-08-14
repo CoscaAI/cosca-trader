@@ -1299,7 +1299,12 @@ func defaultPort() string {
 	if p := os.Getenv("COSCA_TRADER_PORT"); p != "" {
 		return p
 	}
-	return "14126" // família: 14120 serve · 14123 runtime · 14124 neural-link · 14125 node · 14126 trader
+	// Porta ÚNICA e ALTA (24120) — FORA da família 1412x do Cosca (14120 serve,
+	// 14123 runtime, 14124 neural-link, 14125 node, 14126 usada pelo cosca-code).
+	// L645 registrou o conflito histórico: 14126 colidia com o cosca-code
+	// ("bind: address already in use"). A família usa 14xxx; o trader agora
+	// vive em 24xxx — sem sobreposição possível.
+	return "24120"
 }
 
 func defaultDBPath() string {

@@ -2,11 +2,13 @@
 // fail-closed (qualquer Origin bloqueado); o proxy resolve o browser removendo
 // o header Origin das requisições — o core vê um request mesmo-origin/cliente
 // nativo e aplica apenas a auth Bearer. A porta do core é configurável
-// (COSCA_TRADER_CORE_URL); default: 127.0.0.1:14126.
+// (COSCA_TRADER_CORE_URL); default: 127.0.0.1:24120 (porta ÚNICA e ALTA, fora
+// da família 1412x do Cosca — o conflito histórico com o cosca-code na 14126
+// está resolvido).
 import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 
-const CORE_TARGET = process.env.COSCA_TRADER_CORE_URL ?? "http://127.0.0.1:14126";
+const CORE_TARGET = process.env.COSCA_TRADER_CORE_URL ?? "http://127.0.0.1:24120";
 
 function coreProxy(): ProxyOptions {
   return {
@@ -33,6 +35,10 @@ export default defineConfig({
       "/paper": coreProxy(),
       "/timeline": coreProxy(),
       "/ledger": coreProxy(),
+      "/risk": coreProxy(),
+      "/backtest": coreProxy(),
+      "/convergence": coreProxy(),
+      "/markets": coreProxy(),
     },
   },
 });

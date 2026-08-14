@@ -51,7 +51,7 @@ frontend/   React + Vite + TypeScript (desktop Wails) — painel de trading F3
 ## Rodar
 
 ```bash
-# core headless (porta 14126)
+# core headless (porta 24120)
 go run . --db .cosca/trader.db
 
 # core + market data real da Binance
@@ -64,17 +64,17 @@ BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance
 COSCA_TRADER_TOKEN=... BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --live
 
 # endpoints (todos os sensíveis exigem Bearer token)
-curl http://127.0.0.1:14126/health
-curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/positions
-curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/balances
-curl -X POST -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/orders \
+curl http://127.0.0.1:24120/health
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:24120/positions
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:24120/balances
+curl -X POST -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:24120/orders \
   -d '{"symbol":"BTCUSDT","side":"buy","type":"limit","quantity":1,"price":50000}'
 
 # timeline (rastro total)
-curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/timeline
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:24120/timeline
 
 # stream SSE
-curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/events
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:24120/events
 
 # frontend (dev)
 cd frontend && npm install && npm run dev
@@ -208,12 +208,12 @@ go run . --paper --binance --symbol BTCUSDT --interval 1m --strategy ema-cross
 # 1. core no ar (modo paper de exemplo) com token:
 COSCA_TRADER_TOKEN=meu-token go run . --paper
 
-# 2. frontend (dev) — o proxy aponta para o core em 127.0.0.1:14126:
+# 2. frontend (dev) — o proxy aponta para o core em 127.0.0.1:24120:
 cd frontend && npm install && npm run dev
 
 # 3. abra http://localhost:5173 e cole o token no campo da topbar.
 #    Porta do core diferente? aponte o proxy:
-#    COSCA_TRADER_CORE_URL=http://127.0.0.1:14127 npm run dev
+#    COSCA_TRADER_CORE_URL=http://127.0.0.1:24121 npm run dev
 ```
 
 O painel fala com o core **só via proxy** (mesma origem): o CORS fail-closed
@@ -267,7 +267,7 @@ real exige decisão consciente do operador.
 | `COSCA_TRADER_MAX_ORDER_USDT` | `1000` | Limite de notional (preço × quantidade) por ordem. Ordens market estimam o notional pelo preço corrente. |
 | `COSCA_TRADER_STOP_LOSS_PCT` | `0` (desativado) | Stop-loss automático por posição (ex.: `0.05` = 5% abaixo/acima da entrada). |
 | `COSCA_TRADER_ENV` | — | `live` alternativo à flag `--live`. |
-| `COSCA_TRADER_PORT` / `COSCA_TRADER_DB` | `14126` / `.cosca/trader.db` | Porta HTTP e caminho do SQLite. |
+| `COSCA_TRADER_PORT` / `COSCA_TRADER_DB` | `24120` / `.cosca/trader.db` | Porta HTTP e caminho do SQLite. |
 
 **Modo produção é opt-in.** Por padrão, mesmo com `BINANCE_API_KEY`/
 `BINANCE_API_SECRET` reais, o sistema **força a sandbox** (testnet). Só conecta em
@@ -347,7 +347,7 @@ go run . --backtest --symbol BTCUSDT
 
 # HTTP — o mesmo laudo via API (autenticado):
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:14126/backtest?symbol=BTCUSDT"
+  "http://127.0.0.1:24120/backtest?symbol=BTCUSDT"
 ```
 
 O laudo (`ScientificReport`) tem 5 camadas:
@@ -385,7 +385,7 @@ COSCA_TRADER_TOKEN=meu-token go run . --shadow --symbol BTCUSDT --interval 1m --
 COSCA_TRADER_TOKEN=meu-token go run . --shadow --shadow-demo --shadow-strategy breakout
 
 # Acompanhar a convergência:
-curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:14126/convergence
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:24120/convergence
 ```
 
 ### Como a convergência funciona
