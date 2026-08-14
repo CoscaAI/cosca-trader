@@ -22,11 +22,14 @@ func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
 // fakeBroker implementa exchange.Broker em memória.
 type fakeBroker struct {
+	mu     sync.Mutex // protege placed contra goroutines do OMS (trailing/TP)
 	placed []exchange.OrderRequest
 	nextID int
 }
 
 func (f *fakeBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (domain.Order, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.placed = append(f.placed, req)
 	f.nextID++
 	return domain.Order{
@@ -42,6 +45,22 @@ func (f *fakeBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (d
 		TimeInForce:   req.TimeInForce,
 		CreatedAt:     time.Now(),
 	}, nil
+}
+
+// placedOrders devolve uma cópia segura das ordens registradas.
+func (f *fakeBroker) placedOrders() []exchange.OrderRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]exchange.OrderRequest, len(f.placed))
+	copy(out, f.placed)
+	return out
+}
+
+// truncatePlaced remove as últimas n ordens (snapshot para testes de recuo).
+func (f *fakeBroker) truncatePlaced(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.placed = f.placed[:len(f.placed)-n]
 }
 
 func (f *fakeBroker) CancelOrder(_ context.Context, _, _ string) error { return nil }
@@ -1159,4 +1178,86 @@ func TestPlaceOrderRiskDrawdownHalts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("após Resume a ordem deveria passar: %v", err)
 	}
+}
+
+func TestTakeProfitClosesPosition(t *testing.T) {
+	// F4B: mark atinge o alvo → a posição é fechada com ordem market no lado
+	// oposto (ordem STOP é colocada pelo broker simulado de teste).
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) error { return nil }, WithTakeProfitPct(d("0.10")))
+	o.ApplyTrade(domain.Trade{ID: "t-tp1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
+		Price: d("100"), Quantity: d("1"), Timestamp: time.Now()})
+
+	// posição aberta long a 100; TP = 110. mark 105 → não fecha.
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("105"))
+	if p, ok := o.Position("BTCUSDT", "binance"); !ok || !p.IsOpen() {
+		t.Fatal("posição deveria continuar aberta antes do TP")
+	}
+	// mark 112 ≥ 110 → dispara fechamento (ordem market sell no paper broker
+	// não preenche aqui porque o fakeBroker só registra; a posição fecha quando
+	// o fill do fechamento chega via ApplyTrade).
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("112"))
+	waitPlaced(t, b, 1)
+	placed := b.placedOrders()
+	last := placed[len(placed)-1]
+	if last.Side != domain.SideSell || last.Type != domain.OrderMarket {
+		t.Fatalf("esperava ordem market SELL de fechamento, got %+v", last)
+	}
+}
+
+func TestTrailingStopMovesUpNeverDown(t *testing.T) {
+	// F4B: trailing ativa após 3% de ganho; o stop sobe com o maior mark e
+	// nunca recua.
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) error { return nil },
+		WithTrailingStop(d("0.03"), d("0.02"))) // ativa com +3%, trail 2%
+	o.ApplyTrade(domain.Trade{ID: "t-tr1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
+		Price: d("100"), Quantity: d("1"), Timestamp: time.Now()})
+
+	// antes da ativação (+1%) → sem ordem de stop
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("101"))
+	time.Sleep(30 * time.Millisecond)
+	if n := len(b.placedOrders()); n != 0 {
+		t.Fatalf("não deveria haver stop antes da ativação (tem %d)", n)
+	}
+
+	// ativa com +5% (mark 105): stop = 105 × 0.98 = 102.9
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("105"))
+	waitPlaced(t, b, 1) // goroutine do stop em background
+	firstStop := b.placedOrders()[0].StopPrice
+	if !firstStop.Equal(d("102.9")) {
+		t.Fatalf("primeiro stop esperado 102.9, got %v", firstStop)
+	}
+
+	// mark sobe para 110: stop novo = 110 × 0.98 = 107.8 > 102.9 → sobe
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("110"))
+	waitPlaced(t, b, 2)
+	secondStop := b.placedOrders()[1].StopPrice
+	if !secondStop.Equal(d("107.8")) {
+		t.Fatalf("segundo stop esperado 107.8, got %v", secondStop)
+	}
+
+	// mark cai para 106: o maior mark visto continua 110, então o novo stop
+	// seria 107.8 — igual ao atual → o trailing NÃO recua (sem ordem nova).
+	b.truncatePlaced(1) // snapshot antes
+	before := len(b.placedOrders())
+	o.ApplyMarkPrice("BTCUSDT", "binance", d("106"))
+	time.Sleep(50 * time.Millisecond)
+	if n := len(b.placedOrders()); n != before {
+		t.Fatalf("trailing não deveria emitir stop pior: antes %d, depois %d", before, n)
+	}
+}
+
+// waitPlaced espera até o fakeBroker ter n ordens colocadas (a goroutine de
+// trailing/take-profit roda em background e o teste precisa sincronizar).
+func waitPlaced(t *testing.T, b *fakeBroker, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(b.placedOrders()) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout esperando %d ordens no fakeBroker (tem %d)", n, len(b.placedOrders()))
 }

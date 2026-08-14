@@ -34,6 +34,7 @@ type emaState struct {
 	candles    int
 	fastAbove  bool   // fast acima da slow (lado atual)
 	lastSignal string // última direção sinalizada — evita repetir o mesmo lado
+	atrSum     decimal.Decimal // soma dos ranges (para o stop sugerido, F4B)
 }
 
 // NewEMACross cria a estratégia com os períodos default (9/21).
@@ -64,6 +65,8 @@ func (e *EMACross) OnCandle(c domain.Candle) []Signal {
 	st.candles++
 	st.fastEMA = ema(st.fastEMA, price, e.fast)
 	st.slowEMA = ema(st.slowEMA, price, e.slow)
+	// F4B — acumula o range da vela (high−low) para o stop sugerido (ATR simples).
+	st.atrSum = st.atrSum.Add(decimal.NewFromFloat(c.High - c.Low))
 	fastAbove := st.fastEMA.GreaterThan(st.slowEMA)
 
 	// Warm-up: as EMAs ainda estão "nascendo" — só grava o lado, não sinaliza.
@@ -87,7 +90,16 @@ func (e *EMACross) OnCandle(c domain.Candle) []Signal {
 		return nil
 	}
 	st.lastSignal = side
-	return []Signal{{Symbol: c.Symbol, Side: side, Price: price, Reason: reason}}
+
+	// F4B — stop sugerido: distância de 1.5× o range médio das velas (ATR
+	// simples). Em buy, o stop fica ABAIXO da entrada; em sell, ACIMA.
+	atr := st.atrSum.Div(decimal.NewFromInt(int64(st.candles)))
+	stopDist := atr.Mul(decimal.NewFromFloat(1.5))
+	stop := price.Sub(stopDist)
+	if side == "sell" {
+		stop = price.Add(stopDist)
+	}
+	return []Signal{{Symbol: c.Symbol, Side: side, Price: price, Stop: stop, Reason: reason}}
 }
 
 // ema calcula o valor exponencial: k = 2/(periodo+1); ema' = preço×k + ema×(1-k).

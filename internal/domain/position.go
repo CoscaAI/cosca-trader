@@ -21,6 +21,10 @@ type Position struct {
 	RealizedPnL   decimal.Decimal `json:"realized_pnl"`
 	OpenedAt      time.Time       `json:"opened_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
+	// F4B — trailing stop: o maior mark visto e o stop corrente (0 = sem
+	// trailing ativo). O mark alimenta o "ratchet" do trailing.
+	HighestMark  decimal.Decimal `json:"highest_mark,omitempty"`
+	TrailingStop decimal.Decimal `json:"trailing_stop,omitempty"`
 }
 
 // IsOpen devolve se há quantidade em posição.

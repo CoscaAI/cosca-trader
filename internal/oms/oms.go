@@ -67,7 +67,12 @@ type OMS struct {
 	maxOrderUSDT decimal.Decimal             // limite de notional por ordem (P1-1)
 	stopLossPct  decimal.Decimal             // stop-loss automático por posição (P1-2)
 	lastMarkEmit map[string]time.Time        // rate limit do PositionUpdated de mark (1x/s por posição)
-	riskMgr      *risk.Manager               // camada de risco (Fase 4) — nil = desativada
+	riskMgr      *risk.Manager               // camada de risco (F4) — nil = desativada
+
+	// F4B — take-profit e trailing stop por posição. Zero desativa.
+	tpPct                decimal.Decimal
+	trailingActivationPct decimal.Decimal // PnL % que ativa o trailing
+	trailingPct          decimal.Decimal  // distância do trailing abaixo do maior mark
 }
 
 // Option configura o OMS no New.
@@ -102,6 +107,24 @@ func WithIntentStore(s IntentStore) Option {
 // nil (default) = risco desativado (comportamento de biblioteca).
 func WithRiskManager(rm *risk.Manager) Option {
 	return func(o *OMS) { o.riskMgr = rm }
+}
+
+// WithTakeProfitPct habilita o take-profit automático (F4B): quando o mark
+// atinge (entry × (1 + pct)) numa long (ou (1 − pct) numa short), a posição é
+// fechada automaticamente com ordem market. Zero desativa.
+func WithTakeProfitPct(v decimal.Decimal) Option {
+	return func(o *OMS) { o.tpPct = v }
+}
+
+// WithTrailingStop habilita o trailing stop (F4B): o stop sobe (long) / desce
+// (short) conforme o mark, mantendo a distância trailPct do MAIOR mark visto.
+// O trailing só ativa quando o PnL da posição atinge activationPct. Zero
+// desativa cada lado.
+func WithTrailingStop(activationPct, trailPct decimal.Decimal) Option {
+	return func(o *OMS) {
+		o.trailingActivationPct = activationPct
+		o.trailingPct = trailPct
+	}
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit. O emit devolve
@@ -612,6 +635,27 @@ func (o *OMS) ApplyMarkPrice(symbol, exchange string, mark decimal.Decimal) {
 	// a EMISSÃO é que é rate-limita a 1x/s por posição.
 	pos.MarkPrice = mark
 	pos.UpdatedAt = now
+
+	// F4B — take-profit: fecha a posição quando o mark cruza o alvo.
+	if o.tpPct.Sign() > 0 {
+		target := tpTarget(*pos, o.tpPct)
+		hit := (pos.Side == domain.SideBuy && mark.GreaterThanOrEqual(target)) ||
+			(pos.Side == domain.SideSell && mark.LessThanOrEqual(target))
+		if hit {
+			pos.MarkPrice = mark
+			pos.UpdatedAt = now
+			snap := *pos
+			o.mu.Unlock()
+			o.closePositionAsync(snap, "take-profit")
+			return
+		}
+	}
+
+	// F4B — trailing stop: move o stop junto com o mark, nunca para trás.
+	if o.trailingPct.Sign() > 0 {
+		o.applyTrailing(pos, mark, now)
+	}
+
 	if last, ok := o.lastMarkEmit[key]; ok && now.Sub(last) < time.Second {
 		o.mu.Unlock()
 		return
@@ -623,6 +667,112 @@ func (o *OMS) ApplyMarkPrice(symbol, exchange string, mark decimal.Decimal) {
 	if err := o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms:mark", Payload: snap}); err != nil {
 		log.Printf("⚠ oms: persistência de PositionUpdated (mark) falhou: %v", err)
 	}
+}
+
+// tpTarget calcula o preço-alvo do take-profit: entrada × (1+pct) em long,
+// entrada × (1−pct) em short.
+func tpTarget(pos domain.Position, pct decimal.Decimal) decimal.Decimal {
+	one := decimal.NewFromInt(1)
+	if pos.Side == domain.SideSell {
+		return pos.AvgEntryPrice.Mul(one.Sub(pct))
+	}
+	return pos.AvgEntryPrice.Mul(one.Add(pct))
+}
+
+// applyTrailing atualiza o stop de proteção da posição conforme o mark
+// (deve ser chamado com o lock garantido). O stop "trail" segue o MAIOR mark
+// visto (long) mantendo a distância trailingPct — nunca recua. Só ativa quando
+// o PnL já atingiu activationPct. Reutiliza o stopTrigger: uma nova ordem STOP
+// no lado oposto com o stop atualizado, disparada em background.
+func (o *OMS) applyTrailing(pos *domain.Position, mark decimal.Decimal, now time.Time) {
+	if pos.HighestMark.Sign() <= 0 {
+		pos.HighestMark = pos.AvgEntryPrice
+	}
+	// Atualiza o maior mark visto.
+	if mark.GreaterThan(pos.HighestMark) {
+		pos.HighestMark = mark
+	}
+
+	// PnL % corrente (baseado no mark vs entrada).
+	pnlPct := decimal.Zero
+	one := decimal.NewFromInt(1)
+	if pos.Side == domain.SideBuy {
+		pnlPct = mark.Sub(pos.AvgEntryPrice).Div(pos.AvgEntryPrice)
+	} else {
+		pnlPct = pos.AvgEntryPrice.Sub(mark).Div(pos.AvgEntryPrice)
+	}
+	// Só ativa o trailing após o ganho mínimo.
+	if o.trailingActivationPct.Sign() > 0 && pnlPct.LessThan(o.trailingActivationPct) {
+		return
+	}
+
+	// Novo stop: (1 − trailPct) do maior mark (long) / (1 + trailPct) (short).
+	newStop := pos.HighestMark.Mul(one.Sub(o.trailingPct))
+	if pos.Side == domain.SideSell {
+		newStop = pos.HighestMark.Mul(one.Add(o.trailingPct))
+	}
+
+	// Trailing nunca recua: só emite nova ordem de stop se o novo stop for
+	// MELHOR que o anterior (mais próximo da entrada = mais proteção).
+	oldStop := pos.TrailingStop
+	if oldStop.Sign() > 0 {
+		if pos.Side == domain.SideBuy && newStop.LessThanOrEqual(oldStop) {
+			return
+		}
+		if pos.Side == domain.SideSell && newStop.GreaterThanOrEqual(oldStop) {
+			return
+		}
+	}
+	pos.TrailingStop = newStop
+
+	// Emite a ordem de stop em background — nunca bloqueia o tick.
+	guard := *pos
+	go o.placeTrailingStopAsync(guard, newStop)
+}
+
+// placeTrailingStopAsync coloca (ou move) a ordem STOP de proteção da posição
+// para o novo preço de trailing.
+func (o *OMS) placeTrailingStopAsync(pos domain.Position, stopPrice decimal.Decimal) {
+	side := domain.SideSell
+	if pos.Side == domain.SideSell {
+		side = domain.SideBuy
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.PlaceOrder(ctx, exchange.OrderRequest{
+		Symbol:        pos.Symbol,
+		Side:          side,
+		Type:          domain.OrderStop,
+		Quantity:      pos.Quantity,
+		StopPrice:     stopPrice,
+		ClientOrderID: "trail-" + uuid.NewString(),
+	}); err != nil {
+		log.Printf("⚠ oms: trailing stop de %s falhou: %v", pos.Symbol, err)
+	}
+}
+
+// closePositionAsync fecha a posição com ordem market no lado oposto (usada
+// pelo take-profit). A ordem passa pelo fluxo completo (validação, notional,
+// risco, saga).
+func (o *OMS) closePositionAsync(pos domain.Position, reason string) {
+	side := domain.SideSell
+	if pos.Side == domain.SideSell {
+		side = domain.SideBuy
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ord, err := o.PlaceOrder(ctx, exchange.OrderRequest{
+		Symbol:        pos.Symbol,
+		Side:          side,
+		Type:          domain.OrderMarket,
+		Quantity:      pos.Quantity,
+		ClientOrderID: "tp-" + uuid.NewString(),
+	})
+	if err != nil {
+		log.Printf("⚠ oms: take-profit de %s falhou: %v", pos.Symbol, err)
+		return
+	}
+	log.Printf("oms: take-profit (%s) — %s %s qty=%s ordem %s", reason, side, pos.Symbol, pos.Quantity, ord.ID)
 }
 
 // Orders devolve uma cópia das ordens conhecidas.

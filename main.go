@@ -157,6 +157,8 @@ func main() {
 		opts := []oms.Option{
 			oms.WithMaxOrderUSDT(maxOrderLimit()),
 			oms.WithStopLossPct(stopLossPct()),
+			oms.WithTakeProfitPct(takeProfitPct()),
+			oms.WithTrailingStop(trailingActivationPct(), trailingPct()),
 		}
 		// Fase 2A: intent durável pré-broker (fecha a janela de crash) — em
 		// TODO ambiente com persistência.
@@ -332,18 +334,47 @@ func main() {
 				gate[sig.Symbol] = sig.Side
 				gateMu.Unlock()
 
+				// F4B — sizing por risco: se COSCA_TRADER_RISK_PER_TRADE_PCT
+				// estiver definido, a quantidade é calculada para perder no
+				// máximo equity×riskPct se o stop for atingido. Senão, usa a
+				// quantidade fixa da estratégia.
+				qty := ordQty
+				if riskPct := riskPerTradePct(); riskPct.Sign() > 0 {
+					equity := decimal.Zero
+					if riskMgr != nil {
+						equity = riskMgr.State().Equity
+					}
+					entry := decimal.NewFromFloat(c.Close) // market data é float; decimal na fronteira
+					stop := sig.Stop
+					if stop.Sign() <= 0 && stopLossPct().Sign() > 0 {
+						// sem stop explícito no sinal, usa o stop-loss global
+						// como distância de risco (entrada ± pct)
+						stop = entry.Mul(decimal.NewFromInt(1).Add(stopLossPct()))
+						if sig.Side == "sell" {
+							stop = entry.Mul(decimal.NewFromInt(1).Sub(stopLossPct()))
+						}
+					}
+					if equity.IsPositive() && stop.Sign() > 0 {
+						if sized, err := risk.Size(equity, riskPct, entry, stop); err == nil && sized.Sign() > 0 {
+							qty = sized
+						} else if err != nil {
+							log.Printf("⚠ strategy: sizing falhou (%v) — usando qty fixa %s", err, ordQty)
+						}
+					}
+				}
+
 				ord, err := omsEngine.PlaceOrder(context.Background(), exchange.OrderRequest{
 					Symbol:        sig.Symbol,
 					Side:          domain.Side(sig.Side),
 					Type:          domain.OrderMarket,
-					Quantity:      ordQty,
+					Quantity:      qty,
 					ClientOrderID: "strat-" + strat.Name() + "-" + uuid.NewString(),
 				})
 				if err != nil {
 					log.Printf("⚠ strategy %s: ordem %s %s falhou: %v", strat.Name(), sig.Side, sig.Symbol, err)
 					continue
 				}
-				log.Printf("strategy %s: %s %s %s qty=%s (%s)", strat.Name(), sig.Side, sig.Symbol, ord.ID, ordQty, sig.Reason)
+				log.Printf("strategy %s: %s %s %s qty=%s (%s)", strat.Name(), sig.Side, sig.Symbol, ord.ID, qty, sig.Reason)
 			}
 		})
 		log.Printf("COSCA TRADER — estratégia %s ativa no modo paper (qty=%s por sinal)", strat.Name(), ordQty)
@@ -479,6 +510,22 @@ func payloadJSON(p any, target any) error {
 	return json.Unmarshal(data, target)
 }
 
+// riskPerTradePct lê o risco por trade para o sizing (F4B). Default: 0
+// (sizing desativado — usa qty fixa da estratégia). Ex.:
+// COSCA_TRADER_RISK_PER_TRADE_PCT=0.01 → arriscar 1% do equity por trade.
+func riskPerTradePct() decimal.Decimal {
+	raw := os.Getenv("COSCA_TRADER_RISK_PER_TRADE_PCT")
+	if raw == "" {
+		return decimal.Zero
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_RISK_PER_TRADE_PCT inválido (%q) — sizing desativado", raw)
+		return decimal.Zero
+	}
+	return v
+}
+
 // strategyOrderQty lê a quantidade por sinal da estratégia (Fase 3D). Default:
 // 0.001 do ativo base (ex.: BTC) — pequena o bastante para não estourar o
 // limite de notional com preços altos. COSCA_TRADER_STRATEGY_QTY para ajustar.
@@ -572,6 +619,54 @@ func riskMaxDrawdownPct() decimal.Decimal {
 	if err != nil || v.Sign() < 0 {
 		log.Printf("⚠ COSCA_TRADER_MAX_DRAWDOWN_PCT inválido (%q) — usando %s", raw, def)
 		return decimal.RequireFromString(def)
+	}
+	return v
+}
+
+// takeProfitPct lê o take-profit automático (F4B): fecha a posição quando o
+// mark atinge entrada×(1+pct) em long. Default: 0 (desativado). Ex.:
+// COSCA_TRADER_TAKE_PROFIT_PCT=0.10 → fecha com +10%.
+func takeProfitPct() decimal.Decimal {
+	raw := os.Getenv("COSCA_TRADER_TAKE_PROFIT_PCT")
+	if raw == "" {
+		return decimal.Zero
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_TAKE_PROFIT_PCT inválido (%q) — desativado", raw)
+		return decimal.Zero
+	}
+	return v
+}
+
+// trailingActivationPct lê o PnL % que ativa o trailing stop (F4B). Default: 0
+// (trailing desativado). Ex.: COSCA_TRADER_TRAILING_ACTIVATION_PCT=0.03 →
+// ativa com +3% de ganho.
+func trailingActivationPct() decimal.Decimal {
+	raw := os.Getenv("COSCA_TRADER_TRAILING_ACTIVATION_PCT")
+	if raw == "" {
+		return decimal.Zero
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_TRAILING_ACTIVATION_PCT inválido (%q) — desativado", raw)
+		return decimal.Zero
+	}
+	return v
+}
+
+// trailingPct lê a distância do trailing abaixo do maior mark (F4B). Default:
+// 0 (desativado). Ex.: COSCA_TRADER_TRAILING_PCT=0.02 → stop 2% abaixo do
+// maior preço visto.
+func trailingPct() decimal.Decimal {
+	raw := os.Getenv("COSCA_TRADER_TRAILING_PCT")
+	if raw == "" {
+		return decimal.Zero
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_TRAILING_PCT inválido (%q) — desativado", raw)
+		return decimal.Zero
 	}
 	return v
 }
