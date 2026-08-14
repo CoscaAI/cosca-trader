@@ -1,4 +1,7 @@
 // serve.go — API do core (health, timeline, SSE, ordens, posições, saldos).
+// Segurança P0-1: auth FAIL-CLOSED (token obrigatório nos endpoints sensíveis)
+// + CORS fechado (origem não permitida → 403). Isso mata o vetor de CSRF
+// localhost (Simple Request text/plain de sites maliciosos).
 package main
 
 import (
@@ -6,17 +9,32 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 )
 
-func serve(e *engine.Engine, o *oms.OMS, port string) {
+// apiSecurity carrega a política de segurança HTTP do core. Preenchida no
+// startup a partir do ambiente (COSCA_TRADER_TOKEN / COSCA_TRADER_ALLOWED_ORIGINS).
+type apiSecurity struct {
+	token          string
+	allowedOrigins []string
+}
+
+func serve(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) {
+	mux := newMux(e, o, port, sec)
+	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
+	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
+}
+
+// newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
+// sem subir o listener. /health é público; todos os demais endpoints passam
+// pela política de segurança (origem + token).
+func newMux(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// /health — estado do core.
+	// /health — estado do core. Público (liveness, sem dados sensíveis).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		first, last := e.Store.TimeRange()
 		writeJSON(w, map[string]any{
@@ -31,16 +49,17 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		})
 	})
 
-	// /timeline — rastro total (todos os eventos em ordem).
-	mux.HandleFunc("/timeline", func(w http.ResponseWriter, r *http.Request) {
+	// /timeline — rastro total (sensível: ordens, saldos, posições, PnL).
+	mux.HandleFunc("/timeline", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"count":  e.Store.Len(),
 			"events": e.Store.All(),
 		})
-	})
+	}))
 
-	// /events — stream SSE de eventos em tempo real.
-	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+	// /events — stream SSE de eventos em tempo real (sensível: expõe fills,
+	// ordens, saldos e posições — CORS totalmente fechado por padrão).
+	mux.HandleFunc("/events", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming não suportado", http.StatusInternalServerError)
@@ -49,8 +68,6 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		// Sem CORS aberto: o stream expõe ordens/saldos/posições — restringir
-		// a origens confiáveis quando houver cliente web.
 
 		sub := e.Hub.Subscribe()
 		defer e.Hub.Unsubscribe(sub)
@@ -65,10 +82,10 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 				return
 			}
 		}
-	})
+	}))
 
-	// /orders — GET lista ordens · POST envia uma ordem.
-	mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+	// /orders — GET lista ordens · POST envia uma ordem · DELETE cancela.
+	mux.HandleFunc("/orders", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		if o == nil {
 			http.Error(w, "execução não configurada (defina BINANCE_API_KEY/BINANCE_API_SECRET)", http.StatusServiceUnavailable)
 			return
@@ -77,10 +94,6 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		case http.MethodGet:
 			writeJSON(w, o.Orders())
 		case http.MethodPost:
-			if !authorized(r) {
-				http.Error(w, "não autorizado", http.StatusUnauthorized)
-				return
-			}
 			var req exchange.OrderRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, "JSON inválido", http.StatusBadRequest)
@@ -93,10 +106,6 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 			}
 			writeJSON(w, ord)
 		case http.MethodDelete:
-			if !authorized(r) {
-				http.Error(w, "não autorizado", http.StatusUnauthorized)
-				return
-			}
 			symbol := r.URL.Query().Get("symbol")
 			orderID := r.URL.Query().Get("order_id")
 			if symbol == "" || orderID == "" {
@@ -111,28 +120,28 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 		default:
 			http.Error(w, "método não suportado", http.StatusMethodNotAllowed)
 		}
-	})
+	}))
 
-	// /positions — posições abertas.
-	mux.HandleFunc("/positions", func(w http.ResponseWriter, r *http.Request) {
+	// /positions — posições abertas (sensível).
+	mux.HandleFunc("/positions", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		if o == nil {
 			writeJSON(w, []any{})
 			return
 		}
 		writeJSON(w, o.Positions())
-	})
+	}))
 
-	// /balances — saldos.
-	mux.HandleFunc("/balances", func(w http.ResponseWriter, r *http.Request) {
+	// /balances — saldos (sensível).
+	mux.HandleFunc("/balances", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		if o == nil {
 			writeJSON(w, []any{})
 			return
 		}
 		writeJSON(w, o.Balances())
-	})
+	}))
 
-	// /ledger — livro-razão double-entry (saldos por conta + entradas).
-	mux.HandleFunc("/ledger", func(w http.ResponseWriter, r *http.Request) {
+	// /ledger — livro-razão double-entry (sensível).
+	mux.HandleFunc("/ledger", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		if o == nil {
 			writeJSON(w, map[string]any{"balances": map[string]any{}, "entries": []any{}})
 			return
@@ -141,18 +150,51 @@ func serve(e *engine.Engine, o *oms.OMS, port string) {
 			"balances": o.Ledger().Balances(),
 			"entries":  o.Ledger().Entries(),
 		})
-	})
+	}))
 
-	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s", port)
-	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
+	return mux
 }
 
-// authorized verifica o token de API (COSCA_TRADER_TOKEN). Sem token
-// configurado, o modo é desenvolvimento (permissivo, bind em 127.0.0.1).
-func authorized(r *http.Request) bool {
-	token := os.Getenv("COSCA_TRADER_TOKEN")
+// secure envolve um handler sensível: aplica a política de origem (CORS) e a
+// autenticação fail-closed ANTES de delegar. Qualquer falha → erro HTTP, nunca
+// chega ao handler.
+func (s apiSecurity) secure(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.originAllowed(r) {
+			http.Error(w, "origem bloqueada (CORS)", http.StatusForbidden)
+			return
+		}
+		if !authorized(r, s.token) {
+			http.Error(w, "não autorizado", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// originAllowed aplica a política CORS fail-closed: com a lista de origens
+// permitidas vazia (default), QUALQUER header Origin é bloqueado — apenas
+// requests mesmo-origin ou sem Origin (curl, clientes nativos/desktop) passam.
+// Mata o vetor de Simple Request text/plain do CSRF localhost.
+func (s apiSecurity) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // mesmo-origin / cliente sem origem
+	}
+	for _, allowed := range s.allowedOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// authorized é FAIL-CLOSED: sem token configurado ou sem Bearer válido → 401.
+// O token (COSCA_TRADER_TOKEN) é OBRIGATÓRIO em todos os endpoints sensíveis —
+// o modo "desenvolvimento permissivo" foi eliminado.
+func authorized(r *http.Request, token string) bool {
 	if token == "" {
-		return true
+		return false
 	}
 	return r.Header.Get("Authorization") == "Bearer "+token
 }

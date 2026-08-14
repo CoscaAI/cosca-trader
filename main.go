@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
@@ -30,7 +31,18 @@ func main() {
 	symbol := flag.String("symbol", "BTCUSDT", "símbolo para market data")
 	interval := flag.String("interval", "1m", "intervalo dos candles")
 	testnet := flag.Bool("testnet", false, "usar a sandbox da Binance (sem fundos reais)")
+	authFlag := flag.Bool("auth", false, "exigir COSCA_TRADER_TOKEN no startup (fail-fast)")
 	flag.Parse()
+
+	// Segurança P0-1: fail-closed. O token é OBRIGATÓRIO nos endpoints
+	// sensíveis; com --auth o startup falha rápido se ele não estiver definido
+	// (decisão: exigir no startup quando explicitamente pedido; sem --auth o
+	// servidor sobe, mas os endpoints sensíveis respondem 401).
+	token := os.Getenv("COSCA_TRADER_TOKEN")
+	allowedOrigins := splitOrigins(os.Getenv("COSCA_TRADER_ALLOWED_ORIGINS"))
+	if *authFlag && token == "" {
+		log.Fatal("fail-closed: --auth exige COSCA_TRADER_TOKEN (defina a variável para subir os endpoints sensíveis)")
+	}
 
 	db, err := store.Open(*dbPath)
 	if err != nil {
@@ -119,7 +131,26 @@ func main() {
 		log.Printf("COSCA TRADER — modo observação (sem credenciais; defina BINANCE_API_KEY/BINANCE_API_SECRET para executar)")
 	}
 
-	serve(e, omsEngine, *port)
+	serve(e, omsEngine, *port, apiSecurity{
+		token:          token,
+		allowedOrigins: allowedOrigins,
+	})
+}
+
+// splitOrigins divide a lista de origens permitidas (COSCA_TRADER_ALLOWED_ORIGINS,
+// separada por vírgulas), ignorando vazios e espaços. Lista vazia = CORS
+// totalmente fechado (apenas mesmo-origin/sem Origin).
+func splitOrigins(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func defaultPort() string {
