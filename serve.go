@@ -28,8 +28,8 @@ type apiSecurity struct {
 	allowedOrigins []string
 }
 
-func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, port string, sec apiSecurity, mode string) {
-	mux := newMux(e, o, pb, rm, port, sec, mode)
+func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, port string, sec apiSecurity, mode string) {
+	mux := newMux(e, o, pb, rm, conv, port, sec, mode)
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
 }
@@ -37,7 +37,7 @@ func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, por
 // newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
 // sem subir o listener. /health é público; todos os demais endpoints passam
 // pela política de segurança (origem + token).
-func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, port string, sec apiSecurity, mode string) *http.ServeMux {
+func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, port string, sec apiSecurity, mode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /health — estado do core. Público (liveness, sem dados sensíveis).
@@ -212,6 +212,17 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, po
 			"walk_forward":  report.WalkForward,
 			"trade_count":   len(report.Trades),
 		})
+	}))
+
+	// /convergence — o estado do LABORATÓRIO VIVO (Fase 5): a previsão da
+	// estratégia está convergindo com o mercado real? z-score, acerto
+	// observado vs esperado, divergência (regime mudou) e reajustes.
+	mux.HandleFunc("/convergence", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if conv == nil {
+			http.Error(w, "monitor de convergência não ativo (rode com --shadow)", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, conv.State())
 	}))
 
 	return mux

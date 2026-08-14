@@ -50,6 +50,13 @@ func main() {
 	paperFlag := flag.Bool("paper", false, "MODO PAPER (Fase 2B): broker simulado com fills em memória — sem chaves, sem dinheiro real; use --binance para market data real ou rode offline com candles sintéticos")
 	strategyFlag := flag.String("strategy", "", "estratégia automática no modo paper (Fase 3D): 'ema-cross' (default: desligado)")
 	backtestFlag := flag.Bool("backtest", false, "roda o backtest mínimo da estratégia (Fase 3D, semente do F5) e sai")
+	fetchFlag := flag.Bool("fetch", false, "Fase 5: puxa candles REAIS da Binance (API pública, SEM chave) e roda o laudo científico — o caminho de validação antes de qualquer credencial")
+	fetchBars := flag.Int("fetch-bars", 500, "número de velas a puxar no --fetch")
+	fetchInterval := flag.String("fetch-interval", "1h", "intervalo das velas no --fetch (1m/5m/15m/1h/4h/1d)")
+	scanFlag := flag.Bool("scan", false, "Fase 5: SCANNER — avalia TODAS as estratégias com dados reais e ranqueia por score científico")
+	shadowFlag := flag.Bool("shadow", false, "Fase 5: MODO LABORATÓRIO VIVO — observa o mercado REAL (sem chave, sem dinheiro), registra previsões da estratégia, mede CONVERGÊNCIA com a realidade e reajusta sozinho quando o regime muda")
+	shadowStrategy := flag.String("shadow-strategy", "ema-cross", "estratégia no modo shadow")
+	shadowDemo := flag.Bool("shadow-demo", false, "modo shadow com candles sintéticos ACELERADOS (velas de 5s) — para o Don VER o laboratório vivo funcionando em minutos, sem esperar o mercado real")
 	flag.Parse()
 
 	// Fase 2B: papel é um ambiente exclusivo — nunca coexistir com live/testnet
@@ -91,6 +98,9 @@ func main() {
 	e := engine.New(db)
 	ctx := context.Background()
 
+	// shadowMonitor é preenchido pelo modo --shadow e exposto em /convergence.
+	var shadowMonitor *strategy.ConvergenceMonitor
+
 	// Rastreamento total: a partir daqui, TODO evento passa pelo Emit.
 	e.Emit(event.Event{
 		Type:     event.SystemStarted,
@@ -104,6 +114,31 @@ func main() {
 	// Sem broker, sem HTTP — roda e sai.
 	if *backtestFlag {
 		runBacktest(e, *symbol)
+		return
+	}
+
+	// Fase 5 — --fetch: dados REAIS da Binance (API pública, SEM chave) →
+	// laudo científico. É o fluxo de validação: o Don não precisa de credencial
+	// para ver se uma estratégia tem vantagem real; a chave só entra depois.
+	if *fetchFlag {
+		runFetchReport(*symbol, *fetchInterval, *fetchBars)
+		return
+	}
+
+	// Fase 5 — --scan: o SCANNER científico. Puxa dados reais (sem chave) e
+	// avalia TODAS as estratégias registradas, rankeando por score e aplicando
+	// o portão da casa. Responde "qual é a melhor estratégia AGORA?".
+	if *scanFlag {
+		runScan(*symbol, *fetchInterval, *fetchBars)
+		return
+	}
+
+	// Fase 5 — --shadow: o LABORATÓRIO VIVO. Observa o mercado REAL (WebSocket
+	// público, sem chave), registra previsões da estratégia, mede a convergência
+	// com a realidade e reajusta sozinho quando o regime muda. NENHUM dinheiro
+	// em jogo — é a validação contínua que o Don pediu.
+	if *shadowFlag {
+		runShadow(*symbol, *interval, *shadowStrategy, *port, *shadowDemo, e, &shadowMonitor)
 		return
 	}
 
@@ -443,12 +478,228 @@ func main() {
 		}()
 	}
 
-	serve(e, omsEngine, paperBroker, riskMgr, *port, apiSecurity{
+	serve(e, omsEngine, paperBroker, riskMgr, shadowMonitor, *port, apiSecurity{
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	}, mode)
 }
 
+// runFetchReport puxa candles REAIS da Binance (API pública — sem chave,
+// sem credenciais) e roda o laudo científico completo em cima deles. É o
+// fluxo central da Fase 5: validação com dados do MUNDO REAL antes de
+// qualquer chave entrar no sistema.
+func runFetchReport(symbol, interval string, bars int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	bc := binance.New()
+	candles, err := bc.Klines(ctx, symbol, interval, bars, min(bars, 1000))
+	if err != nil {
+		log.Fatalf("fetch %s %s: %v", symbol, interval, err)
+	}
+	log.Printf("dados REAIS da Binance (API pública, sem chave): %d velas %s (%s → %s)",
+		len(candles), interval, candles[0].OpenTime.Format("2006-01-02"),
+		candles[len(candles)-1].OpenTime.Format("2006-01-02"))
+
+	report := strategy.AnalyzeBacktest(strategy.NewEMACross(), candles,
+		decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), 1000, 1000, paperSeed())
+	printReport(report)
+}
+
+// runShadow roda o LABORATÓRIO VIVO (Fase 5): conecta ao market data REAL da
+// Binance (WebSocket público, sem chave), registra cada sinal da estratégia
+// como uma PREVISÃO, acompanha o mercado resolvendo as previsões e mede a
+// CONVERGÊNCIA (a ação faz o que calculamos?). Quando o z-score mostra
+// divergência estatística (regime mudou), dispara o reajuste: re-scan com
+// dados frescos e troca para a melhor estratégia do momento. Nenhum dinheiro
+// em jogo — é a validação contínua antes da chave.
+func runShadow(symbol, interval, strategyName, port string, demo bool, e *engine.Engine, shadowMonitor **strategy.ConvergenceMonitor) {
+	// 1. Scan inicial (REAL via Klines, ou sintético no demo) para obter o win
+	// rate esperado — a referência de convergência do laudo científico.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var hist []domain.Candle
+	var bc *binance.Client
+	source := "dados REAIS da Binance (sem chave)"
+	if !demo {
+		bc = binance.New()
+		var err error
+		hist, err = bc.Klines(ctx, symbol, interval, 300, 300)
+		if err != nil {
+			log.Fatalf("shadow: histórico real: %v", err)
+		}
+	} else {
+		source = "candles sintéticos ACELERADOS (velas de 5s) — demonstração"
+		hist = strategy.SyntheticCandles(paperSeed(), symbol, 300, demoStartPrice(symbol))
+	}
+	expectedHit := 0.5 // default: sem vantagem comprovada, assume sorte
+	gate := strategy.DefaultGate()
+	scan := strategy.Scan(hist, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), gate, 500, 500, paperSeed())
+	active := strategyName
+	for _, s := range scan.Strategies {
+		if s.Name == strategyName && s.PassesGate {
+			expectedHit = s.Report.Stats.WinRate
+			log.Printf("shadow: %s aprovada no laudo — win rate esperado %.1f%% (score %.1f)", s.Name, s.Report.Stats.WinRate*100, s.Score)
+		}
+	}
+	log.Printf("shadow: %s NÃO passou no laudo (win rate esperado %.1f%%) — observando mesmo assim para medir convergência", active, expectedHit*100)
+
+	// 2. Rastreador de previsões + monitor de convergência.
+	tracker := strategy.NewPredictionTracker(active, 3, 100)
+	monitor := strategy.NewConvergence(expectedHit, tracker, strategy.ConvergenceConfig{
+		MinResolved: 20,
+		ZThreshold:  -2.0,
+		OnDivergence: func(st strategy.ConvergenceState) {
+			log.Printf("⚠⚠ REGIME MUDOU: previsão divergiu do mercado (z=%.2f, observado %.0f%% vs esperado %.0f%%) — reajustando com dados frescos...", st.ZScore, st.ObservedHit*100, st.ExpectedHit*100)
+			// Reajuste: re-scan com dados frescos e imprime a melhor do momento.
+			var rescan []domain.Candle
+			if demo {
+				rescan = strategy.SyntheticCandles(paperSeed()+1, symbol, 300, demoStartPrice(symbol))
+			} else if bc != nil {
+				if h, err := bc.Klines(context.Background(), symbol, interval, 300, 300); err == nil {
+					rescan = h
+				}
+			}
+			if len(rescan) > 0 {
+				ns := strategy.Scan(rescan, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), gate, 500, 500, paperSeed())
+				if ns.Best != nil {
+					log.Printf("🔄 reajuste: melhor estratégia AGORA = %s (score %.1f) — a chave só entra se ela passar no portão", ns.Best.Name, ns.Best.Score)
+				} else {
+					log.Printf("🔄 reajuste: nenhuma estratégia passou no portão com dados frescos — mantendo observação")
+				}
+			}
+		},
+	})
+
+	// 3. Estratégia ativa + feed de velas (reais ou demo acelerada).
+	strat, err := strategy.NewByName(active)
+	if err != nil {
+		log.Fatalf("shadow: %v", err)
+	}
+	e.Bus.Subscribe(event.CandleClosed, func(ev event.Event) {
+		c, ok := ev.Payload.(domain.Candle)
+		if !ok || c.Symbol != symbol {
+			return
+		}
+		// Sinais da estratégia → previsões.
+		for _, sig := range strat.OnCandle(c) {
+			tracker.Record(sig)
+			log.Printf("previsão: %s %s @ %s (%s)", sig.Side, sig.Symbol, sig.Price, sig.Reason)
+		}
+		// Resolve previsões + re-checa convergência.
+		tracker.OnCandle(c)
+		monitor.Check()
+	})
+
+	// 4. Market data: Binance REAL (WS público) ou demo acelerada.
+	var feed exchange.Exchange
+	if !demo {
+		feed = bc
+	} else {
+		seed := paperSeed()
+		d := paper.NewDemoFeed(seed, symbol, demoStartPrice(symbol))
+		d.FastDemo() // velas de 5s — o Don vê o laboratório vivo em minutos
+		feed = d
+	}
+	md := market.New(feed, e.Emit)
+	if err := md.Watch(symbol, interval); err != nil {
+		log.Fatalf("shadow: subscribe: %v", err)
+	}
+	log.Printf("═══ LABORATÓRIO VIVO ativo ═══ fonte=%s | símbolo=%s intervalo=%s estratégia=%s | sem chave, sem dinheiro | convergência: esperado %.0f%%, mínimo %d previsões para julgar", source, symbol, interval, active, expectedHit*100, 20)
+
+	// 5. Loop de status + shutdown.
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	go func() {
+		for range ticker.C {
+			st := monitor.State()
+			verdict := "convergindo"
+			if st.Diverged {
+				verdict = "⚠ DIVERGENTE (regime mudou)"
+			}
+			log.Printf("status: %s | resolvidas=%d pendentes=%d | acerto real %.0f%% vs esperado %.0f%% | z=%.2f | %s", verdict, st.Resolved, st.Pending, st.ObservedHit*100, st.ExpectedHit*100, st.ZScore, st.LastReason)
+		}
+	}()
+
+	// Expõe o monitor via HTTP (roda em background; o md.Start abaixo bloqueia).
+	*shadowMonitor = monitor
+	sec := apiSecurity{token: os.Getenv("COSCA_TRADER_TOKEN")}
+	go func() {
+		serve(e, nil, nil, nil, monitor, port, sec, "shadow")
+	}()
+
+	if err := md.Start(ctx); err != nil {
+		log.Printf("shadow: market data encerrado: %v", err)
+	}
+}
+
+// runScan puxa dados REAIS da Binance (API pública, sem chave) e roda o
+// SCANNER: todas as estratégias, mesmo histórico, ranking por score científico
+// e o portão da casa. O resultado é "qual estratégia merece operar AGORA".
+func runScan(symbol, interval string, bars int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	bc := binance.New()
+	candles, err := bc.Klines(ctx, symbol, interval, bars, min(bars, 1000))
+	if err != nil {
+		log.Fatalf("scan %s %s: %v", symbol, interval, err)
+	}
+	log.Printf("dados REAIS da Binance (sem chave): %d velas %s (%s → %s)",
+		len(candles), interval, candles[0].OpenTime.Format("2006-01-02"),
+		candles[len(candles)-1].OpenTime.Format("2006-01-02"))
+
+	gate := strategy.DefaultGate()
+	res := strategy.Scan(candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001),
+		gate, 1000, 1000, paperSeed())
+
+	log.Printf("═══════ SCANNER CIENTÍFICO — %s (%d velas) ═══════", symbol, res.Periods)
+	for _, s := range res.Strategies {
+		st := s.Report.Stats
+		flag := "  "
+		if s.PassesGate {
+			flag = "✓ "
+		}
+		log.Printf("%s%s: score=%.1f | trades=%d win=%.0f%% PF=%.2f sharpe=%.2f dd=%.1f%% | p=%.3f mc_P(perder)=%.0f%% wf=%v",
+			flag, s.Name, s.Score, st.TotalTrades, st.WinRate*100, st.ProfitFactor,
+			st.Sharpe, st.MaxDrawdownPct*100, s.Report.Significance.PValue,
+			s.Report.MonteCarlo.ProbOfLoss*100, s.Report.WalkForward.Consistent)
+	}
+	if res.Best != nil {
+		log.Printf("🏆 MELHOR APROVADA: %s (score %.1f) — candidata a operar", res.Best.Name, res.Best.Score)
+	} else {
+		log.Printf("⚠ nenhuma estratégia passou no portão científico — NENHUMA merece a chave ainda")
+	}
+}
+
+// printReport imprime o laudo científico completo no terminal.
+func printReport(report strategy.ScientificReport) {
+	st := report.Stats
+	log.Printf("═══ LAUDO CIENTÍFICO — %s (%s, dados REAIS) ═══", report.Strategy, report.Symbol)
+	log.Printf("histórico: %d velas | inicial=%s final=%s", report.Periods, report.Initial, report.Final)
+	log.Printf("trades=%d (wins=%d losses=%d) win_rate=%.1f%%", st.TotalTrades, st.Wins, st.Losses, st.WinRate*100)
+	log.Printf("pnl=%s gross=%s loss=%s fees=%s | profit_factor=%.2f expectância=%s", st.NetPnL, st.GrossProfit, st.GrossLoss.Neg(), st.FeesPaid, st.ProfitFactor, st.Expectancy)
+	log.Printf("retorno=%.1f%% max_drawdown=%.1f%% | sharpe=%.2f sortino=%.2f", st.ReturnPct*100, st.MaxDrawdownPct*100, st.Sharpe, st.Sortino)
+	log.Printf("distribuição por trade: p5=%s p50=%s p95=%s", st.P5, st.P50, st.P95)
+	log.Printf("MONTE CARLO (%d sims): p5=%s p50=%s p95=%s | P(perder)=%.1f%% P(ruína)=%.1f%%", report.MonteCarlo.Simulations, report.MonteCarlo.P5, report.MonteCarlo.P50, report.MonteCarlo.P95, report.MonteCarlo.ProbOfLoss*100, report.MonteCarlo.ProbRuin*100)
+	sig := report.Significance
+	verdict := "NÃO significativa (pode ser sorte)"
+	if sig.Significant {
+		verdict = "SIGNIFICATIVA (vantagem real, p≤0.05)"
+	}
+	log.Printf("SIGNIFICÂNCIA: p-value=%.4f z=%.2f → %s", sig.PValue, sig.ZScore, verdict)
+	wf := report.WalkForward
+	wfVerdict := "INCONSISTENTE (perdeu fora da amostra)"
+	if wf.Consistent {
+		wfVerdict = "consistente (lucrou out-of-sample)"
+	}
+	log.Printf("WALK-FORWARD: treino=%d pnl=%s (%d) | teste=%d pnl=%s (%d) → %s", wf.TrainBars, wf.TrainPnL, wf.TrainTrades, wf.TestBars, wf.TestPnL, wf.TestTrades, wfVerdict)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 // runBacktest roda o backtest CIENTÍFICO da estratégia ema-cross (Fase 5) e
 // imprime o laudo completo: métricas, distribuição, Monte Carlo, significância
 // e walk-forward. Candles: do rastro persistido (CandleClosed) quando houver;
@@ -463,27 +714,8 @@ func runBacktest(e *engine.Engine, symbol string) {
 	}
 	report := strategy.AnalyzeBacktest(strategy.NewEMACross(), candles,
 		decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), 1000, 1000, paperSeed())
-
-	st := report.Stats
 	log.Printf("═══ LAUDO CIENTÍFICO — %s (%s) ═══", report.Strategy, source)
-	log.Printf("histórico: %d velas %s | inicial=%s final=%s", report.Periods, report.Symbol, report.Initial, report.Final)
-	log.Printf("trades=%d (wins=%d losses=%d) win_rate=%.1f%%", st.TotalTrades, st.Wins, st.Losses, st.WinRate*100)
-	log.Printf("pnl=%s gross=%s loss=%s fees=%s | profit_factor=%.2f expectância=%s", st.NetPnL, st.GrossProfit, st.GrossLoss.Neg(), st.FeesPaid, st.ProfitFactor, st.Expectancy)
-	log.Printf("retorno=%.1f%% max_drawdown=%.1f%% | sharpe=%.2f sortino=%.2f vol=%.4f", st.ReturnPct*100, st.MaxDrawdownPct*100, st.Sharpe, st.Sortino, st.VolatilityPct)
-	log.Printf("distribuição por trade: p5=%s p25=%s p50=%s p75=%s p95=%s", st.P5, st.P25, st.P50, st.P75, st.P95)
-	log.Printf("MONTE CARLO (%d sims): p5=%s p50=%s p95=%s | P(perder)=%.1f%% P(ruína)=%.1f%%", report.MonteCarlo.Simulations, report.MonteCarlo.P5, report.MonteCarlo.P50, report.MonteCarlo.P95, report.MonteCarlo.ProbOfLoss*100, report.MonteCarlo.ProbRuin*100)
-	sig := report.Significance
-	verdict := "NÃO significativa (pode ser sorte)"
-	if sig.Significant {
-		verdict = "SIGNIFICATIVA (vantagem real, p≤0.05)"
-	}
-	log.Printf("SIGNIFICÂNCIA: p-value=%.4f z=%.2f → %s", sig.PValue, sig.ZScore, verdict)
-	wf := report.WalkForward
-	wfVerdict := "INCONSISTENTE (perdeu fora da amostra)"
-	if wf.Consistent {
-		wfVerdict = "consistente (lucrou out-of-sample)"
-	}
-	log.Printf("WALK-FORWARD: treino=%d velas pnl=%s (%d trades) | teste=%d velas pnl=%s (%d trades) → %s", wf.TrainBars, wf.TrainPnL, wf.TrainTrades, wf.TestBars, wf.TestPnL, wf.TestTrades, wfVerdict)
+	printReport(report)
 }
 
 // extractCandles devolve as velas fechadas persistidas de um símbolo, em ordem

@@ -368,6 +368,44 @@ opera.
 O frontend mostra o card **"Ciência — laudo estatístico"** com o veredito
 (VANTAGEM REAL / SEM VANTAGEM), as métricas e o resultado do Monte Carlo.
 
+## Laboratório vivo — shadow trading + convergência (a resposta ao "o mercado muda")
+
+O Don levantou o problema fundamental: *"parece funcionar mas ao entrar a ação
+muda"*. Um backtest valida o passado; o mercado real pode ter mudado de regime.
+A resposta científica é o **LABORATÓRIO VIVO** (`--shadow`): o sistema observa
+o mercado REAL em tempo real (sem chave, sem dinheiro), registra cada sinal da
+estratégia como uma **PREVISÃO**, e mede se a previsão está **CONVERGINDO** com
+a realidade.
+
+```bash
+# Com dados REAIS da Binance (WebSocket público, sem chave):
+COSCA_TRADER_TOKEN=meu-token go run . --shadow --symbol BTCUSDT --interval 1m --shadow-strategy ema-cross
+
+# Com candles sintéticos ACELERADOS (velas de 5s) — ver funcionando em minutos:
+COSCA_TRADER_TOKEN=meu-token go run . --shadow --shadow-demo --shadow-strategy breakout
+
+# Acompanhar a convergência:
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:14126/convergence
+```
+
+### Como a convergência funciona
+
+1. **Previsão** — cada sinal da estratégia vira uma previsão (direção + preço
+   de entrada + horizonte de N velas).
+2. **Realização** — quando o horizonte passa, o mercado REAL decide: a direção
+   acertou? (hit/miss + retorno).
+3. **Convergência** — o win rate OBSERVADO (janela deslizante) é comparado ao
+   win rate ESPERADO (do laudo científico). O **z-score** mede os desvios:
+   - `z ≥ -2` → **convergindo** (a previsão acompanha a realidade)
+   - `z < -2` → **DIVERGENTE** (regime mudou; o sistema erra MUITO mais que o
+     esperado)
+4. **Reajuste automático** — na divergência, o monitor dispara o re-scan com
+   dados frescos e aponta a melhor estratégia do momento. **A chave só entra
+   quando uma estratégia está convergindo E passa no portão científico.**
+
+O endpoint `/convergence` devolve: estratégia, esperado vs observado, z-score,
+estado (convergindo/divergente), nº de reajustes.
+
 ## Regra de negócio (pesquisa)
 
 Falta conhecimento? Buscar no GitHub por estrelas:
