@@ -55,24 +55,24 @@ go run . --db .cosca/trader.db
 # core + market data real da Binance
 go run . --binance --symbol BTCUSDT --interval 1m
 
-# execução autenticada (ordens/conta) — testnet:
-BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance --testnet
+# execução autenticada (ordens/conta) — SEGURO (sandbox forçada):
+BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance
 
-# endpoints
+# MODO PRODUÇÃO — dinheiro real (exige COSCA_TRADER_TOKEN; nunca sem ele):
+COSCA_TRADER_TOKEN=... BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --live
+
+# endpoints (todos os sensíveis exigem Bearer token)
 curl http://127.0.0.1:14126/health
-curl http://127.0.0.1:14126/positions
-curl http://127.0.0.1:14126/balances
-curl -X POST http://127.0.0.1:14126/orders \
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/positions
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/balances
+curl -X POST -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/orders \
   -d '{"symbol":"BTCUSDT","side":"buy","type":"limit","quantity":1,"price":50000}'
 
-# health
-curl http://127.0.0.1:14126/health
-
 # timeline (rastro total)
-curl http://127.0.0.1:14126/timeline
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/timeline
 
 # stream SSE
-curl http://127.0.0.1:14126/events
+curl -H "Authorization: Bearer $COSCA_TRADER_TOKEN" http://127.0.0.1:14126/events
 
 # frontend (dev)
 cd frontend && npm install && npm run dev
@@ -80,6 +80,51 @@ cd frontend && npm install && npm run dev
 # desktop (Wails)
 wails build -tags webkit2_41
 ```
+
+## Segurança e operação (Fase 1 — blindagem)
+
+O core opera **fail-closed**: nada sensível (ordens, posições, saldos, timeline,
+SSE) é servido sem autenticação, e o modo de produção é **explícito**. Dinheiro
+real exige decisão consciente do operador.
+
+| Variável | Default | Efeito |
+|---|---|---|
+| `COSCA_TRADER_TOKEN` | — | Token Bearer **obrigatório** nos endpoints sensíveis. Sem token, eles respondem `401`. |
+| `COSCA_TRADER_ALLOWED_ORIGINS` | vazio | Origens cross-origin permitidas (CSV). Vazio = CORS fechado: qualquer header `Origin` é bloqueado (`403`). Mata o CSRF localhost. |
+| `COSCA_TRADER_KILL` | — | `1` = kill switch: `PlaceOrder`/`PlaceStopLoss` recusam novas ordens (`ErrKillSwitch`). Cancelamento continua permitido para desmontar posição. |
+| `COSCA_TRADER_MAX_ORDER_USDT` | `1000` | Limite de notional (preço × quantidade) por ordem. Ordens market estimam o notional pelo preço corrente. |
+| `COSCA_TRADER_STOP_LOSS_PCT` | `0` (desativado) | Stop-loss automático por posição (ex.: `0.05` = 5% abaixo/acima da entrada). |
+| `COSCA_TRADER_ENV` | — | `live` alternativo à flag `--live`. |
+| `COSCA_TRADER_PORT` / `COSCA_TRADER_DB` | `14126` / `.cosca/trader.db` | Porta HTTP e caminho do SQLite. |
+
+**Modo produção é opt-in.** Por padrão, mesmo com `BINANCE_API_KEY`/
+`BINANCE_API_SECRET` reais, o sistema **força a sandbox** (testnet). Só conecta em
+`api.binance.com` com `--live` (ou `COSCA_TRADER_ENV=live`), que também exige
+`COSCA_TRADER_TOKEN` no startup (fail-fast).
+
+**Fluxo seguro (nunca pule etapas):**
+
+1. **Testnet** — `BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance`
+   (sandbox, zero risco). Use chaves geradas no painel de testnet.
+2. **Paper** — rode o core em observação (`go run .`) com o frontend; valide o
+   journal, o ledger e os controles de risco.
+3. **Live** — `COSCA_TRADER_TOKEN=... BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --live`
+   com ordens pequenas e `COSCA_TRADER_MAX_ORDER_USDT` conservador. Chaves com
+   permissão mínima (sem retirada) na Binance.
+
+**Invariantes de integridade (P0):**
+
+- **Anti double-trade:** toda ordem carrega `client_order_id` (gerado se
+  ausente) e a chave é única por requisição. Erro ambíguo do broker trava a
+  chave até a reconciliação — o `Reconcile` adota ordens órfãs pelo
+  `origClientOrderId` persistido no journal.
+- **Metadados de instrumento (P1-1):** o core carrega o `/exchangeInfo` no
+  startup (revalidado a cada 24h) e valida/arredonda a ordem contra
+  `step_size`, `tick_size`, `min_qty` e `min_notional` **antes** de assinar —
+  quantidade para baixo, preço para o tick mais próximo.
+- **Stop-loss automático (P1-2):** com `COSCA_TRADER_STOP_LOSS_PCT`, ao abrir
+  posição o OMS coloca um STOP no lado oposto a `pct%` do preço médio de
+  entrada.
 
 ## Regra de negócio (pesquisa)
 
