@@ -40,18 +40,24 @@ const CANDLE_MAX = 500;
 function fmt(v: string | number | undefined | null, digits = 2): string {
   if (v === undefined || v === null || v === "") return "—";
   const n = typeof v === "number" ? v : Number(v);
-  if (Number.isNaN(n)) return "—";
-  return n.toLocaleString("pt-BR", { maximumFractionDigits: digits });
+  // Infinity/NaN derrubavam o painel (maximumFractionDigits out of range).
+  if (!Number.isFinite(n)) return "—";
+  const d = Math.min(Math.max(Math.trunc(digits), 0), 20);
+  return n.toLocaleString("pt-BR", { maximumFractionDigits: d });
 }
 
 function fmtMoney(v: string | number | undefined | null, digits = 2): string {
   if (v === undefined || v === null || v === "") return "—";
   const n = typeof v === "number" ? v : Number(v);
-  if (Number.isNaN(n)) return "—";
+  // Valida finitude (NaN OU Infinity): um tick malformado derrubava o painel
+  // com "maximumFractionDigits value is out of range" no toLocaleString.
+  if (!Number.isFinite(n)) return "—";
+  // Garante dígitos válidos (inteiro 0-20; o toLocaleString estoura fora disso).
+  const d = Math.min(Math.max(Math.trunc(digits), 0), 20);
   const sign = n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toLocaleString("pt-BR", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: digits,
+    minimumFractionDigits: d,
+    maximumFractionDigits: d,
   })}`;
 }
 
