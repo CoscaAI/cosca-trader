@@ -27,6 +27,9 @@ type TradeResult struct {
 	FeesPaid  decimal.Decimal `json:"fees_paid"`
 	HeldBars  int             `json:"held_bars"`   // nº de velas no trade
 	ExitReason string         `json:"exit_reason"` // "signal" | "stop" | "take_profit" | "end"
+	// EnterTag é a tag do SINAL de entrada (lição do Freqtrade: enter_tag/
+	// exit_tag → análise de desempenho POR SINAL, não só agregado).
+	EnterTag string `json:"enter_tag,omitempty"`
 }
 
 // EquityPoint é um ponto da curva de equity (após cada trade fechado).
@@ -70,6 +73,21 @@ type Stats struct {
 	P50             decimal.Decimal `json:"p50"`
 	P75             decimal.Decimal `json:"p75"`
 	P95             decimal.Decimal `json:"p95"`
+
+	// PorSinal (lição do Freqtrade enter_tag): desempenho AGRUPADO por sinal
+	// de entrada — revela quais sinais dão edge e quais só sangram.
+	PorSinal []SignalStats `json:"por_sinal"`
+}
+
+// SignalStats é o desempenho de UM sinal (enter_tag) individual.
+type SignalStats struct {
+	Tag        string          `json:"tag"`
+	Trades     int             `json:"trades"`
+	Wins       int             `json:"wins"`
+	WinRate    float64         `json:"win_rate"`
+	NetPnL     decimal.Decimal `json:"net_pnl"`
+	AvgPnL     decimal.Decimal `json:"avg_pnl"`
+	PF         float64         `json:"pf"`
 }
 
 // computeStats calcula todas as métricas sobre os trades (ordenados por
@@ -182,7 +200,60 @@ func computeStats(trades []TradeResult, initial decimal.Decimal) Stats {
 	s.P75 = decimal.NewFromFloat(percentile(sorted, 0.75))
 	s.P95 = decimal.NewFromFloat(percentile(sorted, 0.95))
 
+	// Desempenho por sinal (enter_tag) — a lição do Freqtrade: quais sinais
+	// dão edge e quais só sangram.
+	s.PorSinal = computeBySignal(trades)
+
 	return s
+}
+
+// computeBySignal agrupa os trades por enter_tag e calcula o desempenho de
+// cada sinal. Revela sinais vencedores e perdedores individuais.
+func computeBySignal(trades []TradeResult) []SignalStats {
+	byTag := map[string]*SignalStats{}
+	order := []string{}
+	for _, t := range trades {
+		tag := t.EnterTag
+		if tag == "" {
+			tag = "sem-tag"
+		}
+		st, ok := byTag[tag]
+		if !ok {
+			st = &SignalStats{Tag: tag}
+			byTag[tag] = st
+			order = append(order, tag)
+		}
+		st.Trades++
+		st.NetPnL = st.NetPnL.Add(t.PnL)
+		if t.PnL.IsPositive() {
+			st.Wins++
+		}
+		if t.PnL.IsNegative() {
+			// PF por sinal: soma das perdas.
+			st.PF += t.PnL.Neg().InexactFloat64()
+		}
+	}
+	out := make([]SignalStats, 0, len(order))
+	for _, tag := range order {
+		st := byTag[tag]
+		if st.Trades > 0 {
+			st.WinRate = float64(st.Wins) / float64(st.Trades)
+			st.AvgPnL = st.NetPnL.Div(decimal.NewFromInt(int64(st.Trades)))
+			// PF: gross profit / gross loss (guard para PF infinito).
+			gross := st.NetPnL.Add(decimal.NewFromFloat(st.PF))
+			if st.PF > 0 {
+				st.PF = gross.Div(decimal.NewFromFloat(st.PF)).InexactFloat64()
+			} else if gross.IsPositive() {
+				st.PF = 9999
+			}
+		}
+		out = append(out, *st)
+	}
+	// Ordena por PnL líquido decrescente (os melhores sinais primeiro).
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].NetPnL.GreaterThan(out[j].NetPnL)
+	})
+	return out
 }
 
 // mean devolve a média aritmética de uma sequência.

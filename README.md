@@ -436,3 +436,30 @@ devolve a melhor por score (win rate 50% + Sharpe 30% + PF 20%). Exemplo real
 na contrarian: win rate subiu de 38% (default) para **54%** (calibrado: RSI
 sobrecomprado 80, sobrevendido 30, stop 1.5×ATR). A calibração vira varredura
 sistemática, não tentativa-e-erro.
+
+## Lições mineradas (Freqtrade × OctoBot × Jesse × Superalgos)
+
+Referência: `.cosca/knowledge/mining-freqtrade-octobot-jesse-superalgos.md` —
+mineração das 4 plataformas líderes (2026-08-14). Três lições já aplicadas:
+
+### 1. Benchmark buy-and-hold (o EDGE contra o mercado)
+O laudo agora reporta `benchmark`: o que comprar-e-segurar teria feito no
+período, o retorno do bot, e o **EDGE** (diferença). Sem isso, um bot que
+"lucra" num bull market parece bom quando na verdade perdeu do buy-and-hold.
+**Regra: edge positivo é o que importa, não lucro absoluto.**
+
+### 2. Análise por sinal (enter_tag)
+Cada trade registra a TAG do sinal que o abriu. O laudo mostra o desempenho
+POR SINAL: quantos trades, win rate, PnL e profit factor de cada sinal —
+revelando quais sinais dão edge e quais só sangram (ex.: "EMA cruzou acima"
+com 0% de win = o lado comprador é o problema).
+
+### 3. Slippage paramétrico no backtest
+`ExecConfig{SlippagePct}` degrada a execução (compra mais cara, venda mais
+barata, stop no lado pessimista). A lição do Superalgos: "sem fees/slippage,
+funciona no teste e quebra ao vivo". O backtest agora é pessimista por padrão.
+
+### 4. Filtro NOTIONAL novo + operação mínima
+A Binance renomeou `MIN_NOTIONAL` → `NOTIONAL`; o parsing aceita ambos. A
+operação mínima real (ex.: BTCUSDT 5 USDT) é calculada e validada no
+`PlaceOrder` (mínimo E máximo).

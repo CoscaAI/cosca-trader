@@ -27,13 +27,39 @@ type ScientificReport struct {
 	MonteCarlo MonteCarloResult `json:"monte_carlo"`
 	Significance SignificanceResult `json:"significance"`
 	WalkForward WalkForwardResult `json:"walk_forward"`
+	// Benchmark (lição do Freqtrade/OctoBot): o que o BUY-AND-HOLD teria feito
+	// no mesmo período — sem isso, não sabemos se o bot tem edge ou surfou o
+	// mercado. Edge = bot retorno − buy-and-hold retorno.
+	Benchmark BenchmarkResult `json:"benchmark"`
+}
+
+// BenchmarkResult é o buy-and-hold do ativo no período do backtest.
+type BenchmarkResult struct {
+	BuyHoldPct float64 `json:"buy_hold_pct"` // retorno % do ativo (close→close, sem fees)
+	EdgePct    float64 `json:"edge_pct"`     // retorno do bot − buy-and-hold (edge real)
+	// BeatMarket: true se o bot superou o buy-and-hold no período.
+	BeatMarket bool `json:"beat_market"`
+}
+
+// ExecConfig é a configuração de execução do backtest (lição Superalgos/
+// OctoBot: sem slippage, "funciona no teste, quebra ao vivo").
+type ExecConfig struct {
+	// SlippagePct é a degradação de preço por lado (ex.: 0.001 = 0.1%).
+	// Compra executa MAIS caro; venda executa MAIS barato. Pessimista, como
+	// a casa. 0 = sem slippage (otimista).
+	SlippagePct decimal.Decimal
 }
 
 // AnalyzeBacktest roda o backtest (com curva de equity e trades) e agrega
 // todas as camadas científicas. Monte Carlo e significância são seedáveis
-// para reprodução.
+// para reprodução. Slippage/fees configuráveis via ExecConfig.
 func AnalyzeBacktest(s Strategy, candles []domainCandle, initial, feePct decimal.Decimal, mcSims, sigTrials int, seed int64) ScientificReport {
-	trades := backtestTrades(s, candles, initial, feePct)
+	return AnalyzeBacktestWith(s, candles, initial, feePct, ExecConfig{}, mcSims, sigTrials, seed)
+}
+
+// AnalyzeBacktestWith é o AnalyzeBacktest com configuração de execução.
+func AnalyzeBacktestWith(s Strategy, candles []domainCandle, initial, feePct decimal.Decimal, exec ExecConfig, mcSims, sigTrials int, seed int64) ScientificReport {
+	trades := backtestTradesWith(s, candles, initial, feePct, exec)
 	final := initial
 	for _, t := range trades {
 		final = final.Add(t.PnL)
@@ -42,6 +68,10 @@ func AnalyzeBacktest(s Strategy, candles []domainCandle, initial, feePct decimal
 
 	// Walk-forward: treina a estratégia nos primeiros 70% e valida nos 30%.
 	wf := walkForward(s, candles, initial, feePct, 0.70, seed)
+
+	// Benchmark buy-and-hold (lição Freqtrade/OctoBot/Superalgos): o edge é
+	// medido CONTRA o mercado, nunca no absoluto.
+	bench := computeBenchmark(candles, initial, final)
 
 	return ScientificReport{
 		Strategy:     s.Name(),
@@ -55,7 +85,31 @@ func AnalyzeBacktest(s Strategy, candles []domainCandle, initial, feePct decimal
 		MonteCarlo:   MonteCarlo(trades, initial, mcSims, seed),
 		Significance: Significance(trades, sigTrials, seed+1),
 		WalkForward:  wf,
+		Benchmark:    bench,
 	}
+}
+
+// computeBenchmark calcula o buy-and-hold do ativo no período e o edge do bot.
+func computeBenchmark(candles []domainCandle, initial, final decimal.Decimal) BenchmarkResult {
+	res := BenchmarkResult{}
+	if len(candles) < 2 || !initial.IsPositive() {
+		return res
+	}
+	first := candles[0].Close
+	last := candles[len(candles)-1].Close
+	if first <= 0 {
+		return res
+	}
+	// Buy-and-hold: compra no primeiro close, vende no último (sem fees — é o
+	// benchmark bruto do mercado).
+	res.BuyHoldPct = (last - first) / first
+
+	// Retorno do bot.
+	botPct := final.Sub(initial).Div(initial).InexactFloat64()
+	// Edge = o que o bot fez A MAIS que o mercado.
+	res.EdgePct = botPct - res.BuyHoldPct
+	res.BeatMarket = res.EdgePct > 0
+	return res
 }
 
 // WalkForwardResult — treino/validação out-of-sample: a estratégia é avaliada
@@ -122,6 +176,14 @@ func walkForward(s Strategy, candles []domainCandle, initial, feePct decimal.Dec
 // posição aberta. O campo Stop do sinal é respeitado (execução intra-vela,
 // pessimista, como a casa). Fees aplicadas nos dois lados.
 func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.Decimal) []TradeResult {
+	return backtestTradesWith(s, candles, initial, feePct, ExecConfig{})
+}
+
+// backtestTradesWith é o backtestTrades com configuração de execução
+// (slippage). Aplica degradação de preço pessimista: compra executa mais
+// cara, venda mais barata — a lição do Superalgos ("sem fees/slippage,
+// funciona no teste e quebra ao vivo").
+func backtestTradesWith(s Strategy, candles []domainCandle, initial, feePct decimal.Decimal, exec ExecConfig) []TradeResult {
 	var out []TradeResult
 	if len(candles) == 0 {
 		return out
@@ -133,6 +195,18 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 	held := 0
 	idx := 0
 	activeStop := decimal.Zero // stop-loss do trade aberto (do sinal de entrada)
+	pendingTag := ""           // tag do sinal que abriu o trade atual
+
+	// slip aplica a degradação pessimista ao preço de execução.
+	slip := func(px decimal.Decimal, isBuy bool) decimal.Decimal {
+		if exec.SlippagePct.Sign() <= 0 || !px.IsPositive() {
+			return px
+		}
+		if isBuy {
+			return px.Mul(decimal.NewFromInt(1).Add(exec.SlippagePct))
+		}
+		return px.Mul(decimal.NewFromInt(1).Sub(exec.SlippagePct))
+	}
 
 	finish := func(exit decimal.Decimal, reason string, barIdx int) {
 		gross := decimal.Zero
@@ -154,28 +228,34 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 			FeesPaid:   fee,
 			HeldBars:   held,
 			ExitReason: reason,
+			EnterTag:   pendingTag,
 		})
 		position = decimal.Zero
 		entry = decimal.Zero
 		activeStop = decimal.Zero
+		pendingTag = ""
 		held = 0
 		_ = barIdx
 	}
 
 	// open abre posição na direção pedida (fechando a oposta se houver flip).
-	open := func(side string, price, stop decimal.Decimal) {
+	// O preço de ENTRADA executa com slippage pessimista (compra mais cara,
+	// venda mais barata).
+	open := func(side string, price, stop decimal.Decimal, tag string) {
+		execPx := slip(price, side == "buy")
 		if position.Sign() > 0 && entrySide != side {
-			// FLIP: fecha a posição atual e abre na direção contrária.
-			finish(price, "flip", idx)
+			// FLIP: fecha a posição atual (com slip no lado oposto) e abre.
+			finish(slip(price, entrySide != "buy"), "flip", idx)
 		}
 		if position.IsZero() {
-			position = equity.Div(price)
-			entry = price
+			position = equity.Div(execPx)
+			entry = execPx
 			entrySide = side
-			fee := price.Mul(position).Mul(feePct)
+			fee := execPx.Mul(position).Mul(feePct)
 			equity = equity.Sub(fee)
 			held = 0
 			activeStop = stop
+			pendingTag = tag
 		}
 	}
 
@@ -196,7 +276,8 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 				stopped = true
 			}
 			if stopped {
-				finish(exit, "stop", idx)
+				// Saída no stop executa com slippage no lado da venda.
+				finish(slip(exit, entrySide != "buy"), "stop", idx)
 			}
 		}
 
@@ -209,9 +290,9 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 			}
 			switch sig.Side {
 			case "buy":
-				open("buy", price, sig.Stop)
+				open("buy", price, sig.Stop, sig.Reason)
 			case "sell":
-				open("sell", price, sig.Stop)
+				open("sell", price, sig.Stop, sig.Reason)
 			}
 		}
 		idx++
@@ -221,7 +302,7 @@ func backtestTrades(s Strategy, candles []domainCandle, initial, feePct decimal.
 	// Liquida posição remanescente no último preço.
 	if position.Sign() > 0 {
 		last := decimal.NewFromFloat(candles[len(candles)-1].Close)
-		finish(last, "end", len(candles))
+		finish(slip(last, entrySide != "buy"), "end", len(candles))
 	}
 	return out
 }

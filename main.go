@@ -692,6 +692,15 @@ func printReport(report strategy.ScientificReport) {
 		wfVerdict = "consistente (lucrou out-of-sample)"
 	}
 	log.Printf("WALK-FORWARD: treino=%d pnl=%s (%d) | teste=%d pnl=%s (%d) → %s", wf.TrainBars, wf.TrainPnL, wf.TrainTrades, wf.TestBars, wf.TestPnL, wf.TestTrades, wfVerdict)
+	b := report.Benchmark
+	bVerdict := "❌ perdeu do buy-and-hold"
+	if b.BeatMarket {
+		bVerdict = "✅ superou o buy-and-hold"
+	}
+	log.Printf("BENCHMARK: buy-and-hold %.1f%% | bot %.1f%% | EDGE %+.1f%% → %s", b.BuyHoldPct*100, report.Stats.ReturnPct*100, b.EdgePct*100, bVerdict)
+	for _, sg := range report.Stats.PorSinal {
+		log.Printf("  sinal %q: %d trades win=%.0f%% pnl=%s pf=%.2f", sg.Tag, sg.Trades, sg.WinRate*100, sg.NetPnL, sg.PF)
+	}
 }
 
 func min(a, b int) int {
