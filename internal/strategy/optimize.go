@@ -2,11 +2,15 @@
 // parâmetros de uma estratégia contra o histórico real e devolve a melhor por
 // ACERTIVIDADE (win rate) E por retorno ajustado. É a resposta ao Don
 // "aumente ao máximo a acertividade": a calibração vira varredura sistemática,
-// não tentativa-e-erro manual.
+// não tentativa-e-erro manual. Executa em PARALELO (worker pool) — a lição da
+// testing farm do Superalgos aplicada ao Go: casos independentes rodam
+// simultaneamente e o resultado é idêntico ao serial (determinístico).
 package strategy
 
 import (
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/shopspring/decimal"
 
@@ -63,24 +67,51 @@ func Optimize(factory Factory, setter ParamSetter, candles []domain.Candle, init
 		combos = next
 	}
 
-	for _, combo := range combos {
-		s := factory()
-		params := map[string]float64{}
-		for i, r := range ranges {
-			val := combo[i]
-			params[r.Name] = val
-			if setter != nil {
-				setter(s, r.Name, val)
-			}
-		}
-		report := AnalyzeBacktest(s, candles, initial, feePct, mcSims, sigTrials, seed)
-		st := report.Stats
-		score := st.WinRate*0.5 + transformSharpe(st.Sharpe)*0.3 + transformPF(st.ProfitFactor)*0.2
-		res.Ranked = append(res.Ranked, OptimizeResult{
-			Strategy: "optimize", Params: params, Score: score,
-			WinRate: st.WinRate, PnL: st.NetPnL, ProfitFactor: st.ProfitFactor, Trades: st.TotalTrades,
-		})
+	// Worker pool: cada combinação é um caso independente (testing farm).
+	// Resultados são indexados por posição → determinístico (mesma ordem do
+	// serial), independente da ordem de conclusão das goroutines.
+	results := make([]OptimizeResult, len(combos))
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(combos) {
+		workers = len(combos)
 	}
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				combo := combos[i]
+				s := factory()
+				params := map[string]float64{}
+				for j, r := range ranges {
+					val := combo[j]
+					params[r.Name] = val
+					if setter != nil {
+						setter(s, r.Name, val)
+					}
+				}
+				report := AnalyzeBacktest(s, candles, initial, feePct, mcSims, sigTrials, seed)
+				st := report.Stats
+				score := st.WinRate*0.5 + transformSharpe(st.Sharpe)*0.3 + transformPF(st.ProfitFactor)*0.2
+				results[i] = OptimizeResult{
+					Strategy: "optimize", Params: params, Score: score,
+					WinRate: st.WinRate, PnL: st.NetPnL, ProfitFactor: st.ProfitFactor, Trades: st.TotalTrades,
+				}
+			}
+		}()
+	}
+	for i := range combos {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	res.Ranked = results
 
 	// Ordena por score decrescente e guarda o melhor.
 	sort.Slice(res.Ranked, func(i, j int) bool {

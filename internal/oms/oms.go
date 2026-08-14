@@ -68,6 +68,7 @@ type OMS struct {
 	stopLossPct  decimal.Decimal             // stop-loss automático por posição (P1-2)
 	lastMarkEmit map[string]time.Time        // rate limit do PositionUpdated de mark (1x/s por posição)
 	riskMgr      *risk.Manager               // camada de risco (F4) — nil = desativada
+	protections  *risk.Protections           // proteções de mercado (StoplossGuard/Cooldown) — nil = desativadas
 
 	// F4B — take-profit e trailing stop por posição. Zero desativa.
 	tpPct                decimal.Decimal
@@ -107,6 +108,13 @@ func WithIntentStore(s IntentStore) Option {
 // nil (default) = risco desativado (comportamento de biblioteca).
 func WithRiskManager(rm *risk.Manager) Option {
 	return func(o *OMS) { o.riskMgr = rm }
+}
+
+// WithProtections liga as proteções de mercado (lição do Freqtrade):
+// StoplossGuard (pausa após N stops recentes) + CooldownPeriod (re-entrada
+// imediata no mesmo par). nil = desativadas.
+func WithProtections(p *risk.Protections) Option {
+	return func(o *OMS) { o.protections = p }
 }
 
 // WithTakeProfitPct habilita o take-profit automático (F4B): quando o mark
@@ -249,6 +257,17 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 			}
 		}
 		if err := o.riskMgr.Check(notional, o.positionSnapshot(), o.openOrderCount()); err != nil {
+			o.mu.Lock()
+			delete(o.pending, req.ClientOrderID)
+			o.mu.Unlock()
+			return nil, err
+		}
+	}
+
+	// Proteções de mercado (StoplossGuard/Cooldown) — falha rápido antes da
+	// saga de intent.
+	if o.protections != nil {
+		if err := o.protections.Check(req.Symbol); err != nil {
 			o.mu.Lock()
 			delete(o.pending, req.ClientOrderID)
 			o.mu.Unlock()
@@ -515,6 +534,11 @@ func (o *OMS) ApplyOrderUpdate(ord domain.Order) {
 	switch ord.Status {
 	case domain.OrderFilled:
 		t = event.OrderFilled
+		// Proteções (lição Freqtrade): uma ordem de STOP executou = perda na
+		// proteção → o StoplossGuard conta. Pref. `sl-`/`trail-` no client id.
+		if o.protections != nil && !o.replaying && strings.HasPrefix(ord.ClientOrderID, "sl-") {
+			o.protections.OnStopLoss()
+		}
 	case domain.OrderPartiallyFilled:
 		t = event.OrderPartiallyFilled
 	case domain.OrderCanceled:
@@ -584,6 +608,10 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 	if closed {
 		if err := o.emitEvent(event.Event{Type: event.PositionClosed, Source: "oms", Payload: *pos}); err != nil {
 			log.Printf("⚠ oms: persistência de PositionClosed falhou: %v", err)
+		}
+		// Proteções (lição Freqtrade): fechou trade → cooldown do par.
+		if o.protections != nil && !o.replaying {
+			o.protections.OnTradeClosed(t.Symbol)
 		}
 	}
 	if opened {

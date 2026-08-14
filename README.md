@@ -463,3 +463,27 @@ funciona no teste e quebra ao vivo". O backtest agora é pessimista por padrão.
 A Binance renomeou `MIN_NOTIONAL` → `NOTIONAL`; o parsing aceita ambos. A
 operação mínima real (ex.: BTCUSDT 5 USDT) é calculada e validada no
 `PlaceOrder` (mínimo E máximo).
+
+### 5. Proteções de mercado (StoplossGuard + Cooldown)
+
+Lição do Freqtrade aplicada: circuit-breakers que pausam novas entradas quando
+o mercado está adverso.
+
+```bash
+COSCA_TRADER_GUARD_MAX_STOPS=3      # N stops recentes → pausa (0 = off)
+COSCA_TRADER_GUARD_LOOKBACK=12      # janela de velas do guard
+COSCA_TRADER_GUARD_PAUSE_CANDLES=6  # velas de pausa ao disparar
+COSCA_TRADER_COOLDOWN_CANDLES=5     # velas de cooldown por par após fechar
+```
+
+- **StoplossGuard**: 3 stops na janela → pausa entradas por 6 velas (o mercado
+  está "armado" contra a estratégia; parar é a decisão lucrativa).
+- **CooldownPeriod**: após fechar um trade, o par fica bloqueado por N velas —
+  evita re-entrada imediata no mesmo movimento.
+
+### 6. Testing farm (otimizador paralelo)
+
+Lição do Superalgos aplicada: a varredura de parâmetros roda em worker pool
+(tantos workers quanto CPUs), casos independentes em paralelo — resultado
+IDÊNTICO ao serial (determinístico por seed e índice), mas N× mais rápido.
+Ideal para varrer ativos × parâmetros × timeframes em escala.

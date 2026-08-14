@@ -204,6 +204,11 @@ func main() {
 		if riskMgr != nil {
 			opts = append(opts, oms.WithRiskManager(riskMgr))
 		}
+		// Proteções de mercado (lição Freqtrade): StoplossGuard + Cooldown.
+		prot := buildProtections()
+		if prot != nil {
+			opts = append(opts, oms.WithProtections(prot))
+		}
 		return opts
 	}
 
@@ -770,6 +775,45 @@ func payloadJSON(p any, target any) error {
 		}
 	}
 	return json.Unmarshal(data, target)
+}
+
+// buildProtections monta as proteções de mercado a partir das envs (lição do
+// Freqtrade: StoplossGuard pausa após N stops; CooldownPeriod evita re-entrada
+// imediata). Zero/ausente = proteção desativada.
+func buildProtections() *risk.Protections {
+	maxStops := envInt("COSCA_TRADER_GUARD_MAX_STOPS", 0)
+	lookback := envInt("COSCA_TRADER_GUARD_LOOKBACK", 12)
+	pause := envInt("COSCA_TRADER_GUARD_PAUSE_CANDLES", 6)
+	cooldown := envInt("COSCA_TRADER_COOLDOWN_CANDLES", 0)
+
+	var guard *risk.StoplossGuard
+	if maxStops > 0 {
+		guard = &risk.StoplossGuard{MaxStops: maxStops, Lookback: lookback, PauseCandles: pause}
+	}
+	var cd *risk.CooldownPeriod
+	if cooldown > 0 {
+		cd = &risk.CooldownPeriod{CooldownCandles: cooldown}
+	}
+	if guard == nil && cd == nil {
+		return nil
+	}
+	log.Printf("proteções ativas: stoploss-guard(max=%d stops em %d velas, pausa %d) cooldown(%d velas)",
+		maxStops, lookback, pause, cooldown)
+	return risk.NewProtections(guard, cd)
+}
+
+// envInt lê uma env int com default.
+func envInt(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("⚠ %s inválido (%q) — usando %d", name, raw, def)
+		return def
+	}
+	return v
 }
 
 // riskPerTradePct lê o risco por trade para o sizing (F4B). Default: 0
