@@ -152,6 +152,16 @@ func TestPlaceOrderRejectsBelowMinimum(t *testing.T) {
 	}
 }
 
+func TestToStatusExpired(t *testing.T) {
+	// P1-2: EXPIRED é estado terminal próprio, não rejeição.
+	if toStatus("EXPIRED") != domain.OrderExpired {
+		t.Errorf("EXPIRED deveria mapear para OrderExpired, veio %v", toStatus("EXPIRED"))
+	}
+	if toStatus("REJECTED") != domain.OrderRejected {
+		t.Errorf("REJECTED deveria mapear para OrderRejected, veio %v", toStatus("REJECTED"))
+	}
+}
+
 func TestToBinanceTypeMapping(t *testing.T) {
 	cases := map[domain.OrderType]string{
 		domain.OrderLimit:      "LIMIT",

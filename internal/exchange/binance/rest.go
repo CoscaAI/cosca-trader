@@ -248,8 +248,11 @@ func toStatus(s string) domain.OrderStatus {
 		return domain.OrderFilled
 	case "CANCELED", "PENDING_CANCEL":
 		return domain.OrderCanceled
-	case "REJECTED", "EXPIRED":
+	case "REJECTED":
 		return domain.OrderRejected
+	case "EXPIRED":
+		// P1-2: EXPIRED é um estado terminal distinto — não é rejeição.
+		return domain.OrderExpired
 	default:
 		return domain.OrderNew
 	}

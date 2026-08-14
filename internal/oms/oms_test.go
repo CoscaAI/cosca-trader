@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func (f *fakeBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (d
 		Side:          req.Side,
 		Type:          req.Type,
 		Price:         req.Price,
+		StopPrice:     req.StopPrice,
 		Quantity:      req.Quantity,
 		Status:        domain.OrderNew,
 		TimeInForce:   req.TimeInForce,
@@ -478,6 +480,152 @@ func TestPlaceOrderNoLimitWhenDisabled(t *testing.T) {
 	}
 	if ord.ID == "" {
 		t.Error("ordem não registrada")
+	}
+}
+
+// trackingBroker é thread-safe (o stop-loss automático roda em goroutine —
+// precisa tolerar -race).
+type trackingBroker struct {
+	mu     sync.Mutex
+	placed []exchange.OrderRequest
+}
+
+func (t *trackingBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (domain.Order, error) {
+	t.mu.Lock()
+	t.placed = append(t.placed, req)
+	ord := domain.Order{
+		ID:            "ord-" + itoa(len(t.placed)),
+		ClientOrderID: req.ClientOrderID,
+		Symbol:        req.Symbol,
+		Side:          req.Side,
+		Type:          req.Type,
+		Price:         req.Price,
+		StopPrice:     req.StopPrice,
+		Quantity:      req.Quantity,
+		Status:        domain.OrderNew,
+	}
+	t.mu.Unlock()
+	return ord, nil
+}
+
+func (t *trackingBroker) requests() []exchange.OrderRequest {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]exchange.OrderRequest(nil), t.placed...)
+}
+
+func (t *trackingBroker) CancelOrder(_ context.Context, _, _ string) error { return nil }
+func (t *trackingBroker) Balances(_ context.Context) ([]domain.Balance, error) {
+	return nil, nil
+}
+func (t *trackingBroker) OpenOrders(_ context.Context, _ string) ([]domain.Order, error) {
+	return nil, nil
+}
+func (t *trackingBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
+
+// ── P1-2: stop-loss automático + validação de stop orders ──────────────────
+
+func TestPlaceOrderRequiresStopPrice(t *testing.T) {
+	o := New(&fakeBroker{}, func(event.Event) {})
+	cases := []exchange.OrderRequest{
+		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStop, Quantity: d("1")},
+		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStopMarket, Quantity: d("1")},
+		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStopLimit, Quantity: d("1"), Price: d("90")},
+		{Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStopLimit, Quantity: d("1"), StopPrice: d("95")},
+	}
+	for i, req := range cases {
+		if _, err := o.PlaceOrder(context.Background(), req); err == nil {
+			t.Errorf("caso %d deveria falhar (stop sem campos obrigatórios)", i)
+		}
+	}
+	if _, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderStop, Quantity: d("1"), StopPrice: d("95"),
+	}); err != nil {
+		t.Errorf("stop válido falhou: %v", err)
+	}
+}
+
+func TestPlaceStopLoss(t *testing.T) {
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) {})
+
+	// long 2 @ 100, pct 5% → SELL stop a 95, quantidade 2.
+	ord, err := o.PlaceStopLoss(context.Background(), domain.Position{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Quantity: d("2"), AvgEntryPrice: d("100"),
+	}, d("0.05"))
+	if err != nil {
+		t.Fatalf("PlaceStopLoss: %v", err)
+	}
+	if ord.Side != domain.SideSell || !ord.StopPrice.Equal(d("95")) || !ord.Quantity.Equal(d("2")) {
+		t.Errorf("stop long errado: %+v", ord)
+	}
+	if ord.ClientOrderID == "" {
+		t.Error("stop sem client_order_id")
+	}
+
+	// short 2 @ 100, pct 5% → BUY stop a 105.
+	ord2, err := o.PlaceStopLoss(context.Background(), domain.Position{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideSell, Quantity: d("2"), AvgEntryPrice: d("100"),
+	}, d("0.05"))
+	if err != nil {
+		t.Fatalf("PlaceStopLoss short: %v", err)
+	}
+	if ord2.Side != domain.SideBuy || !ord2.StopPrice.Equal(d("105")) {
+		t.Errorf("stop short errado: %+v", ord2)
+	}
+
+	// posição sem quantidade → erro.
+	if _, err := o.PlaceStopLoss(context.Background(), domain.Position{
+		Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Quantity: decimal.Zero, AvgEntryPrice: d("100"),
+	}, d("0.05")); err == nil {
+		t.Error("posição sem quantidade deveria falhar")
+	}
+}
+
+func TestAutoStopLossOnPositionOpen(t *testing.T) {
+	b := &trackingBroker{}
+	o := New(b, func(event.Event) {}, WithStopLossPct(d("0.05")))
+
+	o.ApplyTrade(domain.Trade{
+		ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy,
+		Price: d("100"), Quantity: d("2"), Timestamp: time.Now(),
+	})
+
+	// o stop-loss é assíncrono (user stream não pode bloquear) — aguarda.
+	var stop *exchange.OrderRequest
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := range b.requests() {
+			if b.requests()[i].Type == domain.OrderStop {
+				cp := b.requests()[i]
+				stop = &cp
+				break
+			}
+		}
+		if stop != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if stop == nil {
+		t.Fatal("stop-loss automático não foi enviado após abrir posição")
+	}
+	if stop.Side != domain.SideSell || !stop.Quantity.Equal(d("2")) || !stop.StopPrice.Equal(d("95")) {
+		t.Errorf("stop automático errado: %+v", stop)
+	}
+}
+
+func TestApplyOrderUpdateOrderExpired(t *testing.T) {
+	var events []event.Event
+	o := New(&fakeBroker{}, func(e event.Event) { events = append(events, e) })
+
+	o.ApplyOrderUpdate(domain.Order{ID: "o1", Symbol: "BTCUSDT", Status: domain.OrderExpired})
+
+	if len(events) != 1 || events[0].Type != event.OrderExpired {
+		t.Fatalf("EXPIRED deveria emitir OrderExpired, veio %+v", events)
+	}
+	if events[0].Severity != event.SeverityWarning {
+		t.Errorf("EXPIRED deveria ser warning, veio %q", events[0].Severity)
 	}
 }
 

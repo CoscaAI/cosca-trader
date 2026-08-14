@@ -101,7 +101,10 @@ func main() {
 			log.Printf("COSCA TRADER — modo SEGURO: forçando sandbox (testnet). Para produção use --live.")
 		}
 		tc := binance.NewTrading(apiKey, apiSecret, env)
-		omsEngine = oms.New(tc, e.Emit, oms.WithMaxOrderUSDT(maxOrderLimit()))
+		omsEngine = oms.New(tc, e.Emit,
+			oms.WithMaxOrderUSDT(maxOrderLimit()),
+			oms.WithStopLossPct(stopLossPct()),
+		)
 
 		// Kill switch local (P0-3): parada de emergência — bloqueia novas
 		// ordens enquanto COSCA_TRADER_KILL=1.
@@ -172,6 +175,21 @@ func maxOrderLimit() decimal.Decimal {
 	if err != nil || v.Sign() < 0 {
 		log.Printf("⚠ COSCA_TRADER_MAX_ORDER_USDT inválido (%q) — usando default %d", raw, def)
 		return decimal.NewFromInt(def)
+	}
+	return v
+}
+
+// stopLossPct lê o percentual de stop-loss automático (P1-2). Zero = desativado.
+// Ex.: COSCA_TRADER_STOP_LOSS_PCT=0.05 → stop 5% abaixo/acima da entrada.
+func stopLossPct() decimal.Decimal {
+	raw := os.Getenv("COSCA_TRADER_STOP_LOSS_PCT")
+	if raw == "" {
+		return decimal.Zero
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_STOP_LOSS_PCT inválido (%q) — desativado", raw)
+		return decimal.Zero
 	}
 	return v
 }

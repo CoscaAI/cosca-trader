@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -52,6 +54,7 @@ type OMS struct {
 	replaying    bool                        // true durante Replay (suprime emissão)
 	kill         bool                        // kill switch local (COSCA_TRADER_KILL=1)
 	maxOrderUSDT decimal.Decimal             // limite de notional por ordem (P1-1)
+	stopLossPct  decimal.Decimal             // stop-loss automático por posição (P1-2)
 }
 
 // Option configura o OMS no New.
@@ -63,6 +66,13 @@ type Option func(*OMS)
 // COSCA_TRADER_MAX_ORDER_USDT). Assim o guardrail vive onde o dinheiro vive.
 func WithMaxOrderUSDT(v decimal.Decimal) Option {
 	return func(o *OMS) { o.maxOrderUSDT = v }
+}
+
+// WithStopLossPct habilita o stop-loss automático (P1-2): quando uma posição
+// abre, coloca uma ordem de proteção no lado oposto a pct% do preço médio de
+// entrada (ex.: 0.05 = 5%). Zero desativa.
+func WithStopLossPct(v decimal.Decimal) Option {
+	return func(o *OMS) { o.stopLossPct = v }
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit.
@@ -180,6 +190,55 @@ func (o *OMS) checkNotional(ctx context.Context, req exchange.OrderRequest) erro
 		return errors.Join(ErrOrderTooLarge, fmt.Errorf("notional %s USDT excede o limite %s USDT por ordem (%s)", notional, o.maxOrderUSDT, req.Symbol))
 	}
 	return nil
+}
+
+// PlaceStopLoss coloca uma ordem de proteção (STOP) no lado oposto da posição,
+// a pct% do preço médio de entrada. Ex.: long a 100 com pct 0.05 → SELL stop a
+// 95. A ordem passa pelo fluxo completo de PlaceOrder (validação, notional,
+// saga de recuperação, client_order_id obrigatório).
+func (o *OMS) PlaceStopLoss(ctx context.Context, pos domain.Position, pct decimal.Decimal) (*domain.Order, error) {
+	if o.KillSwitch() {
+		return nil, errors.Join(ErrKillSwitch, errors.New("kill switch ativo: sem novas ordens (inclui stop-loss)"))
+	}
+	if pos.Quantity.Sign() <= 0 {
+		return nil, errors.Join(ErrInvalidOrder, errors.New("posição sem quantidade para proteger"))
+	}
+	if pct.Sign() <= 0 {
+		return nil, errors.Join(ErrInvalidOrder, errors.New("pct de stop-loss deve ser positivo"))
+	}
+	side := domain.SideSell
+	if pos.Side == domain.SideSell {
+		side = domain.SideBuy
+	}
+	return o.PlaceOrder(ctx, exchange.OrderRequest{
+		Symbol:        pos.Symbol,
+		Side:          side,
+		Type:          domain.OrderStop, // STOP_LOSS (stop-market) na Binance spot
+		Quantity:      pos.Quantity,
+		StopPrice:     stopTrigger(pos, pct),
+		ClientOrderID: "sl-" + uuid.NewString(),
+	})
+}
+
+// stopTrigger calcula o preço gatilho do stop: abaixo da entrada em posição
+// long, acima em posição short.
+func stopTrigger(pos domain.Position, pct decimal.Decimal) decimal.Decimal {
+	one := decimal.NewFromInt(1)
+	if pos.Side == domain.SideSell {
+		return pos.AvgEntryPrice.Mul(one.Add(pct))
+	}
+	return pos.AvgEntryPrice.Mul(one.Sub(pct))
+}
+
+// placeStopLossAsync dispara o stop-loss automático em segundo plano — a
+// abertura de posição vem do user stream e não pode bloquear o handler.
+func (o *OMS) placeStopLossAsync(pos domain.Position) {
+	pct := o.stopLossPct
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if _, err := o.PlaceStopLoss(ctx, pos, pct); err != nil {
+		log.Printf("⚠ oms: stop-loss automático de %s falhou: %v", pos.Symbol, err)
+	}
 }
 
 // recoverAfterError é a saga de recuperação P0-2: após um erro do broker
@@ -304,6 +363,11 @@ func (o *OMS) ApplyOrderUpdate(ord domain.Order) {
 	case domain.OrderRejected:
 		t = event.OrderRejected
 		sev = event.SeverityWarning
+	case domain.OrderExpired:
+		// P1-2: EXPIRED caía em OrderSubmitted (rótulo errado) — agora tem
+		// evento próprio e severidade de atenção.
+		t = event.OrderExpired
+		sev = event.SeverityWarning
 	}
 	o.emitEvent(event.Event{Type: t, Source: "oms", Severity: sev, Payload: ord})
 }
@@ -346,6 +410,12 @@ func (o *OMS) ApplyTrade(t domain.Trade) {
 	}
 	if opened {
 		o.emitEvent(event.Event{Type: event.PositionOpened, Source: "oms", Payload: *pos})
+		// P1-2: stop-loss automático — protege a posição assim que ela abre
+		// (nunca durante Replay, que não pode tocar na exchange).
+		if o.stopLossPct.Sign() > 0 && !o.replaying {
+			guard := *pos
+			go o.placeStopLossAsync(guard)
+		}
 	}
 	if !opened && !closed {
 		o.emitEvent(event.Event{Type: event.PositionUpdated, Source: "oms", Payload: *pos})
@@ -590,8 +660,24 @@ func validateOrder(req exchange.OrderRequest) error {
 	if req.Quantity.Sign() <= 0 {
 		return errors.Join(ErrInvalidOrder, errors.New("quantidade deve ser positiva"))
 	}
-	if req.Type == domain.OrderLimit && req.Price.Sign() <= 0 {
-		return errors.Join(ErrInvalidOrder, errors.New("ordem limit exige preço positivo"))
+	// P1-2: ordens stop EXIGEM stop_price (antes aceitavam e a Binance
+	// rejeitava com erro enigmático).
+	switch req.Type {
+	case domain.OrderLimit:
+		if req.Price.Sign() <= 0 {
+			return errors.Join(ErrInvalidOrder, errors.New("ordem limit exige preço positivo"))
+		}
+	case domain.OrderStop, domain.OrderStopMarket:
+		if req.StopPrice.Sign() <= 0 {
+			return errors.Join(ErrInvalidOrder, errors.New("ordem stop exige stop_price positivo"))
+		}
+	case domain.OrderStopLimit:
+		if req.StopPrice.Sign() <= 0 {
+			return errors.Join(ErrInvalidOrder, errors.New("ordem stop_limit exige stop_price positivo"))
+		}
+		if req.Price.Sign() <= 0 {
+			return errors.Join(ErrInvalidOrder, errors.New("ordem stop_limit exige preço positivo"))
+		}
 	}
 	return nil
 }
