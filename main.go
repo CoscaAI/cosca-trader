@@ -22,6 +22,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/market"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/store"
+	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -100,7 +101,7 @@ func main() {
 			log.Printf("COSCA TRADER — modo SEGURO: forçando sandbox (testnet). Para produção use --live.")
 		}
 		tc := binance.NewTrading(apiKey, apiSecret, env)
-		omsEngine = oms.New(tc, e.Emit)
+		omsEngine = oms.New(tc, e.Emit, oms.WithMaxOrderUSDT(maxOrderLimit()))
 
 		// Kill switch local (P0-3): parada de emergência — bloqueia novas
 		// ordens enquanto COSCA_TRADER_KILL=1.
@@ -157,6 +158,22 @@ func main() {
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	})
+}
+
+// maxOrderLimit lê o limite de valor por ordem (P1-1). Default seguro: 1000
+// USDT. Valor inválido ou negativo cai no default (com aviso).
+func maxOrderLimit() decimal.Decimal {
+	const def = 1000
+	raw := os.Getenv("COSCA_TRADER_MAX_ORDER_USDT")
+	if raw == "" {
+		return decimal.NewFromInt(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_MAX_ORDER_USDT inválido (%q) — usando default %d", raw, def)
+		return decimal.NewFromInt(def)
+	}
+	return v
 }
 
 // splitOrigins divide a lista de origens permitidas (COSCA_TRADER_ALLOWED_ORIGINS,

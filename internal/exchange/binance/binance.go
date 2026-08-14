@@ -34,6 +34,9 @@ type Client struct {
 	apiKey   string
 	secret   string
 
+	infoMu sync.Mutex
+	info   *Info // metadados de instrumento (exchangeInfo) — P1-1
+
 	mu   sync.Mutex
 	conn *websocket.Conn
 	subs []string

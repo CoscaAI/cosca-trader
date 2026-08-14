@@ -412,6 +412,75 @@ func (a *ambiguousBroker) OpenOrders(_ context.Context, _ string) ([]domain.Orde
 }
 func (a *ambiguousBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
 
+// priceBroker é um fakeBroker com PriceProvider (para o limite de notional de
+// ordens market).
+type priceBroker struct {
+	fakeBroker
+	price decimal.Decimal
+}
+
+func (p *priceBroker) Price(_ context.Context, _ string) (decimal.Decimal, error) {
+	return p.price, nil
+}
+
+// ── P1-1: limite de valor por ordem ────────────────────────────────────────
+
+func TestPlaceOrderNotionalLimit(t *testing.T) {
+	b := &priceBroker{price: d("50000")}
+	o := New(b, func(event.Event) {}, WithMaxOrderUSDT(d("1000")))
+
+	// limit: 50000 × 1 = 50000 > 1000 → rejeitado
+	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("50000"),
+	})
+	if !errors.Is(err, ErrOrderTooLarge) {
+		t.Fatalf("esperava ErrOrderTooLarge, veio %v", err)
+	}
+	if len(b.placed) != 0 {
+		t.Errorf("ordem acima do limite não deveria chegar ao broker")
+	}
+
+	// dentro do limite (50000 × 0.01 = 500 ≤ 1000) → passa
+	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("0.01"), Price: d("50000"),
+	})
+	if err != nil {
+		t.Fatalf("ordem dentro do limite falhou: %v", err)
+	}
+	if ord.ID == "" {
+		t.Error("ordem válida não registrada")
+	}
+
+	// market sem preço: estima notional pelo preço corrente (50000 × 0.1 = 5000 > 1000)
+	_, err = o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("0.1"),
+	})
+	if !errors.Is(err, ErrOrderTooLarge) {
+		t.Fatalf("market acima do limite deveria falhar, veio %v", err)
+	}
+	// market pequeno passa (50000 × 0.001 = 50)
+	if _, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("0.001"),
+	}); err != nil {
+		t.Fatalf("market dentro do limite falhou: %v", err)
+	}
+}
+
+func TestPlaceOrderNoLimitWhenDisabled(t *testing.T) {
+	// limite 0 = desativado: ordem grande passa (padrão de biblioteca).
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) {}, WithMaxOrderUSDT(decimal.Zero))
+	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("100"), Price: d("50000"),
+	})
+	if err != nil {
+		t.Fatalf("com trava desativada a ordem deveria passar: %v", err)
+	}
+	if ord.ID == "" {
+		t.Error("ordem não registrada")
+	}
+}
+
 // ── P0-3: kill switch ──────────────────────────────────────────────────────
 
 func TestKillSwitchBlocksNewOrders(t *testing.T) {

@@ -33,6 +33,7 @@ var (
 	ErrOrderNotFound  = errors.New("ordem não encontrada")
 	ErrDuplicateOrder = errors.New("client_order_id duplicado")
 	ErrKillSwitch     = errors.New("kill switch ativo: novas ordens bloqueadas")
+	ErrOrderTooLarge  = errors.New("ordem acima do limite de valor")
 )
 
 // OMS é o motor de ordens/posições/saldos.
@@ -40,31 +41,48 @@ type OMS struct {
 	broker exchange.Broker
 	emit   func(event.Event)
 
-	mu          sync.RWMutex
-	orders      map[string]*domain.Order    // por ID da exchange
-	clientOrder map[string]string           // clientOrderID → orderID (idempotência)
-	pending     map[string]string           // clientOrderID → symbol (estado ambíguo/saga P0-2)
-	positions   map[string]*domain.Position // por symbol:exchange
-	balances    map[string]domain.Balance   // por ativo
-	ledger      *ledger.Ledger              // double-entry (fees + PnL)
-	seenTrades  map[string]struct{}         // dedup de fills por Trade.ID
-	replaying   bool                        // true durante Replay (suprime emissão)
-	kill        bool                        // kill switch local (COSCA_TRADER_KILL=1)
+	mu           sync.RWMutex
+	orders       map[string]*domain.Order    // por ID da exchange
+	clientOrder  map[string]string           // clientOrderID → orderID (idempotência)
+	pending      map[string]string           // clientOrderID → symbol (estado ambíguo/saga P0-2)
+	positions    map[string]*domain.Position // por symbol:exchange
+	balances     map[string]domain.Balance   // por ativo
+	ledger       *ledger.Ledger              // double-entry (fees + PnL)
+	seenTrades   map[string]struct{}         // dedup de fills por Trade.ID
+	replaying    bool                        // true durante Replay (suprime emissão)
+	kill         bool                        // kill switch local (COSCA_TRADER_KILL=1)
+	maxOrderUSDT decimal.Decimal             // limite de notional por ordem (P1-1)
+}
+
+// Option configura o OMS no New.
+type Option func(*OMS)
+
+// WithMaxOrderUSDT define o limite de valor (notional) por ordem. Zero/negativo
+// desativa a trava. O default do OMS como biblioteca é permissivo (0); o
+// default de PRODUÇÃO é 1000 USDT, aplicado na composição raiz (main.go lê
+// COSCA_TRADER_MAX_ORDER_USDT). Assim o guardrail vive onde o dinheiro vive.
+func WithMaxOrderUSDT(v decimal.Decimal) Option {
+	return func(o *OMS) { o.maxOrderUSDT = v }
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit.
-func New(broker exchange.Broker, emit func(event.Event)) *OMS {
-	return &OMS{
-		broker:      broker,
-		emit:        emit,
-		orders:      make(map[string]*domain.Order),
-		clientOrder: make(map[string]string),
-		pending:     make(map[string]string),
-		positions:   make(map[string]*domain.Position),
-		balances:    make(map[string]domain.Balance),
-		ledger:      ledger.New(),
-		seenTrades:  make(map[string]struct{}),
+func New(broker exchange.Broker, emit func(event.Event), opts ...Option) *OMS {
+	o := &OMS{
+		broker:       broker,
+		emit:         emit,
+		orders:       make(map[string]*domain.Order),
+		clientOrder:  make(map[string]string),
+		pending:      make(map[string]string),
+		positions:    make(map[string]*domain.Position),
+		balances:     make(map[string]domain.Balance),
+		ledger:       ledger.New(),
+		seenTrades:   make(map[string]struct{}),
+		maxOrderUSDT: decimal.Zero, // permissivo como biblioteca; main.go impõe 1000
 	}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
 }
 
 // SetKillSwitch liga/desliga o kill switch local. Quando ativo, PlaceOrder
@@ -124,6 +142,14 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 	o.pending[req.ClientOrderID] = req.Symbol
 	o.mu.Unlock()
 
+	// P1-1: limite de valor por ordem (fail antes de chegar na exchange).
+	if err := o.checkNotional(ctx, req); err != nil {
+		o.mu.Lock()
+		delete(o.pending, req.ClientOrderID)
+		o.mu.Unlock()
+		return nil, err
+	}
+
 	ord, err := o.broker.PlaceOrder(ctx, req)
 	if err != nil {
 		return o.recoverAfterError(ctx, req, err)
@@ -132,6 +158,28 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 	o.registerOrder(req, ord)
 	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
 	return &ord, nil
+}
+
+// checkNotional aplica o limite de valor por ordem (P1-1). Notional = preço ×
+// quantidade; para ordens market sem preço, estima pelo preço corrente via
+// PriceProvider ou usa a quantidade como proxy conservador. Dinheiro em
+// decimal.Decimal — nunca float.
+func (o *OMS) checkNotional(ctx context.Context, req exchange.OrderRequest) error {
+	if o.maxOrderUSDT.Sign() <= 0 {
+		return nil // trava desativada (0 = ilimitado)
+	}
+	notional := req.Quantity // proxy para ordens market sem preço
+	if req.Price.Sign() > 0 {
+		notional = req.Price.Mul(req.Quantity)
+	} else if p, ok := o.broker.(exchange.PriceProvider); ok {
+		if px, err := p.Price(ctx, req.Symbol); err == nil && px.Sign() > 0 {
+			notional = px.Mul(req.Quantity)
+		}
+	}
+	if notional.GreaterThan(o.maxOrderUSDT) {
+		return errors.Join(ErrOrderTooLarge, fmt.Errorf("notional %s USDT excede o limite %s USDT por ordem (%s)", notional, o.maxOrderUSDT, req.Symbol))
+	}
+	return nil
 }
 
 // recoverAfterError é a saga de recuperação P0-2: após um erro do broker

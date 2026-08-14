@@ -83,6 +83,13 @@ type Broker interface {
 	StartUserStream(ctx context.Context, h Handler) error
 }
 
+// PriceProvider é uma interface OPCIONAL de brokers que conseguem devolver o
+// preço corrente de um símbolo — usada pelo OMS para estimar o notional de
+// ordens market (limite COSCA_TRADER_MAX_ORDER_USDT).
+type PriceProvider interface {
+	Price(ctx context.Context, symbol string) (decimal.Decimal, error)
+}
+
 // OrderRecoverer é uma interface OPCIONAL de brokers que conseguem consultar
 // uma ordem pelo clientOrderID (origClientOrderId na Binance). Usada pela saga
 // de recuperação do OMS: quando PlaceOrder falha de forma ambígua (timeout,

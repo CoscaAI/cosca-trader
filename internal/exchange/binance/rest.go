@@ -61,12 +61,21 @@ func (r restOrder) toDomain() (domain.Order, error) {
 	}, nil
 }
 
-// PlaceOrder envia uma ordem (POST /api/v3/order).
+// PlaceOrder envia uma ordem (POST /api/v3/order). P1-1: antes de assinar,
+// valida/arredonda contra as regras do instrumento (step_size, tick_size,
+// min_qty, min_notional) carregadas do exchangeInfo.
 func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (domain.Order, error) {
+	if err := c.ensureInfo(ctx); err != nil {
+		return domain.Order{}, err
+	}
+	if err := c.applySymbolRules(&req); err != nil {
+		return domain.Order{}, err
+	}
+
 	params := url.Values{}
 	params.Set("symbol", req.Symbol)
 	params.Set("side", string(req.Side))
-	params.Set("type", string(req.Type))
+	params.Set("type", toBinanceType(req.Type))
 	params.Set("quantity", req.Quantity.String())
 	if req.Price.Sign() > 0 {
 		params.Set("price", req.Price.String())
@@ -86,6 +95,46 @@ func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 		return domain.Order{}, err
 	}
 	return out.toDomain()
+}
+
+// ensureInfo garante que o cache de metadados de instrumento existe e não está
+// velho (revalida a cada 24h).
+func (c *Client) ensureInfo(ctx context.Context) error {
+	c.infoMu.Lock()
+	if c.info == nil {
+		c.info = newInfo(c.restBase)
+	}
+	info := c.info
+	c.infoMu.Unlock()
+	return info.RefreshIfStale(ctx, 24*time.Hour)
+}
+
+// symbolInfo devolve as regras do símbolo do cache (fail-closed se não houver).
+func (c *Client) symbolInfo(symbol string) (SymbolInfo, bool) {
+	c.infoMu.Lock()
+	defer c.infoMu.Unlock()
+	if c.info == nil {
+		return SymbolInfo{}, false
+	}
+	return c.info.Get(symbol)
+}
+
+// toBinanceType converte o tipo de ordem de domínio para o nome aceito pela
+// API da Binance (spot). STOP/STOP_MARKET viram STOP_LOSS (spot não tem
+// STOP_MARKET); STOP_LIMIT vira STOP_LOSS_LIMIT.
+func toBinanceType(t domain.OrderType) string {
+	switch t {
+	case domain.OrderMarket:
+		return "MARKET"
+	case domain.OrderStop:
+		return "STOP_LOSS"
+	case domain.OrderStopLimit:
+		return "STOP_LOSS_LIMIT"
+	case domain.OrderStopMarket:
+		return "STOP_LOSS"
+	default:
+		return "LIMIT"
+	}
 }
 
 // OrderByClientOrderID consulta uma ordem pelo origClientOrderId (GET
