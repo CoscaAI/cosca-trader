@@ -14,7 +14,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import { CoreClient, streamEvents } from "./api";
+import { CoreClient, streamEvents, UnavailableError } from "./api";
 import type {
   BacktestReport,
   Balance,
@@ -662,6 +662,11 @@ export default function App() {
   const [lastPrice, setLastPrice] = useState<TickPayload | null>(null);
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
 
+  // Refs de "recurso inativo": após um 503 (convergence sem --shadow, etc.),
+  // o painel DESISTE de re-tentar no polling — não martela o servidor.
+  const convGivenUp = useRef(false);
+  const mktGivenUp = useRef(false);
+
   const client = useMemo(() => new CoreClient(token), [token]);
 
   const onTokenChange = (v: string) => {
@@ -704,14 +709,20 @@ export default function App() {
       setScience(null);
     }
     try {
-      setMarkets(await client.markets());
-    } catch {
-      setMarkets(null);
+      if (!convGivenUp.current) {
+        setConvergence(await client.convergence());
+      }
+    } catch (err) {
+      if (err instanceof UnavailableError) convGivenUp.current = true;
+      setConvergence(null);
     }
     try {
-      setConvergence(await client.convergence());
-    } catch {
-      setConvergence(null);
+      if (!mktGivenUp.current) {
+        setMarkets(await client.markets());
+      }
+    } catch (err) {
+      if (err instanceof UnavailableError) mktGivenUp.current = true;
+      setMarkets(null);
     }
   }, [client, token]);
 

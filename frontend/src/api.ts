@@ -17,6 +17,19 @@ import type {
   StreamEvent,
 } from "./types";
 
+// UnavailableError: o endpoint existe mas o recurso NÃO está ativo no modo
+// atual (ex.: /convergence sem --shadow → 503). O painel deve DESISTIR de
+// re-tentar neste recurso (não martelar o servidor a cada polling), em vez
+// de tratá-lo como erro transitório.
+export class UnavailableError extends Error {
+  status: number;
+  constructor(status: number, path: string) {
+    super(`${path} ${status} (recurso inativo)`);
+    this.name = "UnavailableError";
+    this.status = status;
+  }
+}
+
 export class CoreClient {
   constructor(private token: string) {}
 
@@ -88,6 +101,7 @@ export class CoreClient {
 
   private async get<T>(path: string): Promise<T> {
     const r = await fetch(path, { headers: this.authHeaders() });
+    if (r.status === 503) throw new UnavailableError(503, path);
     if (!r.ok) throw new Error(`${path} ${r.status}`);
     return (await r.json()) as T;
   }
