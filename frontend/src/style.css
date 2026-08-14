@@ -332,7 +332,84 @@ td.mono {
 
 .chart-card {
   grid-column: span 8;
-  min-height: 340px;
+  min-height: 380px;
+}
+
+/* cabeçalho do gráfico: símbolo + seletor de timeframe */
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.chart-head h2 {
+  margin-bottom: 0;
+}
+
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sym-input {
+  width: 110px;
+  background: rgba(10, 15, 26, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.sym-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.tf-group {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.tf-btn {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+
+.tf-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.tf-btn.active {
+  background: linear-gradient(135deg, rgba(46, 230, 168, 0.22), rgba(20, 184, 166, 0.1));
+  border-color: rgba(46, 230, 168, 0.55);
+  color: var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+/* o container do gráfico precisa de ALTURA — autoSize:true com altura 0
+   deixava o gráfico espremido. */
+.chart {
+  width: 100%;
+  height: 330px;
 }
 
 .science-card {

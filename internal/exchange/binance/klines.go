@@ -173,18 +173,24 @@ func intervalMillis(interval string) int64 {
 		return 3 * 60_000
 	case "5m":
 		return 5 * 60_000
+	case "10m":
+		return 10 * 60_000
 	case "15m":
 		return 15 * 60_000
 	case "30m":
 		return 30 * 60_000
 	case "1h":
 		return 60 * 60_000
+	case "2h":
+		return 2 * 60 * 60_000
 	case "4h":
 		return 4 * 60 * 60_000
 	case "1d":
 		return 24 * 60 * 60_000
 	case "1w":
 		return 7 * 24 * 60 * 60_000
+	case "1M":
+		return 30 * 24 * 60 * 60_000 // mês ≈ 30d (aproximação para janelas)
 	default:
 		return 60_000 // default 1m
 	}

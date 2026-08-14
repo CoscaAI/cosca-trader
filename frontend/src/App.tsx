@@ -35,6 +35,10 @@ const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
 
+// Timeframes do gráfico (o Don pediu a lista completa). 1s não tem histórico
+// na Binance (mínimo 1m) — fica no seletor para o fluxo ao vivo do SSE.
+const TF_OPTIONS = ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
+
 // ── formatação ──────────────────────────────────────────────────────────────
 
 function fmt(v: string | number | undefined | null, digits = 2): string {
@@ -101,9 +105,11 @@ function useHealth() {
 function CandlestickChart({
   candles,
   lastPrice,
+  timeframe,
 }: {
   candles: CandlePayload[];
   lastPrice: TickPayload | null;
+  timeframe: string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -122,7 +128,24 @@ function CandlestickChart({
         horzLines: { color: "#1e2636" },
       },
       rightPriceScale: { borderColor: "#1e2636" },
-      timeScale: { borderColor: "#1e2636", timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: "#1e2636",
+        timeVisible: true,
+        secondsVisible: false,
+        // formato de data/hora visível e legível (o Don pediu data e hora)
+        tickMarkFormatter: (time: UTCTimestamp) => {
+          const d = new Date((time as number) * 1000);
+          const hh = String(d.getHours()).padStart(2, "0");
+          const mm = String(d.getMinutes()).padStart(2, "0");
+          const dd = String(d.getDate()).padStart(2, "0");
+          const mo = String(d.getMonth() + 1).padStart(2, "0");
+          // timeframes curtos (≤4h) mostram hora; longos (≥1d) mostram data
+          if (timeframe && ["1d", "1w", "1M"].includes(timeframe)) {
+            return `${dd}/${mo}`;
+          }
+          return `${dd}/${mo} ${hh}:${mm}`;
+        },
+      },
       crosshair: { mode: CrosshairMode.Normal },
     });
     const series = chart.addSeries(CandlestickSeries, {
@@ -140,7 +163,7 @@ function CandlestickChart({
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, []);
+  }, [timeframe]);
 
   // velas fechadas: redesenha o histórico
   useEffect(() => {
@@ -661,6 +684,8 @@ export default function App() {
   const [candles, setCandles] = useState<CandlePayload[]>([]);
   const [lastPrice, setLastPrice] = useState<TickPayload | null>(null);
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
+  const [timeframe, setTimeframe] = useState<string>("1h");
+  const [chartSymbol, setChartSymbol] = useState<string>("BTCUSDT");
 
   // Refs de "recurso inativo": após um 503 (convergence sem --shadow, etc.),
   // o painel DESISTE de re-tentar no polling — não martela o servidor.
@@ -733,7 +758,7 @@ export default function App() {
     let alive = true;
     (async () => {
       try {
-        const hist = await client.candles("BTCUSDT", "1h", 300);
+        const hist = await client.candles(chartSymbol, timeframe, 300);
         if (alive && hist.length > 0) setCandles(hist);
       } catch {
         /* offline: o gráfico usa só os candles do SSE */
@@ -742,7 +767,7 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [client, token]);
+  }, [client, token, chartSymbol, timeframe]);
 
   const refreshRef = useRef(refresh);
   useEffect(() => {
@@ -841,10 +866,32 @@ export default function App() {
 
       <main className="grid">
         <section className="card chart-card">
-          <h2>
-            {lastPrice ? `${lastPrice.symbol} — ${fmtMoney(lastPrice.price, 1)}` : "gráfico"}
-          </h2>
-          <CandlestickChart candles={candles} lastPrice={lastPrice} />
+          <div className="chart-head">
+            <h2>
+              {chartSymbol} — {fmtMoney(lastPrice?.price, 1) ?? "—"}
+            </h2>
+            <div className="chart-controls">
+              <input
+                className="sym-input"
+                value={chartSymbol}
+                onChange={(e) => setChartSymbol(e.target.value.toUpperCase())}
+                placeholder="BTCUSDT"
+                spellCheck={false}
+              />
+              <div className="tf-group">
+                {TF_OPTIONS.map((tf) => (
+                  <button
+                    key={tf}
+                    className={`tf-btn ${timeframe === tf ? "active" : ""}`}
+                    onClick={() => setTimeframe(tf)}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <CandlestickChart candles={candles} lastPrice={lastPrice} timeframe={timeframe} />
         </section>
 
         <section className="card">
