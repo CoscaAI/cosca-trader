@@ -317,6 +317,31 @@ table.compact td {
   font-variant-numeric: tabular-nums;
 }
 
+.metric .v.warn {
+  color: #e0a43c;
+}
+
+.metric .v small {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* ── banner de risco (F4): trading pausado por regra de risco ───────────── */
+
+.risk-banner {
+  grid-column: 1 / -1;
+  background: rgba(224, 64, 64, 0.15);
+  border: 1px solid #e04040;
+  color: #ff8a8a;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-align: center;
+}
+
 /* ── formulário de ordens ───────────────────────────────────────────────── */
 
 .order-form {

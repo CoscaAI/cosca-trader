@@ -27,6 +27,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/ledger"
+	"github.com/CoscaAI/cosca-trader/internal/risk"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
@@ -66,6 +67,7 @@ type OMS struct {
 	maxOrderUSDT decimal.Decimal             // limite de notional por ordem (P1-1)
 	stopLossPct  decimal.Decimal             // stop-loss automático por posição (P1-2)
 	lastMarkEmit map[string]time.Time        // rate limit do PositionUpdated de mark (1x/s por posição)
+	riskMgr      *risk.Manager               // camada de risco (Fase 4) — nil = desativada
 }
 
 // Option configura o OMS no New.
@@ -92,6 +94,14 @@ func WithStopLossPct(v decimal.Decimal) Option {
 // de crash. Sem o store, a saga fica em memória (comportamento anterior).
 func WithIntentStore(s IntentStore) Option {
 	return func(o *OMS) { o.intents = s }
+}
+
+// WithRiskManager liga a camada de risco (Fase 4): cada PlaceOrder valida a
+// ordem candidata contra exposição/drawdown/rate limit ANTES da saga de
+// intent — fail rápido, sem gastar client_order_id nem tocar a exchange.
+// nil (default) = risco desativado (comportamento de biblioteca).
+func WithRiskManager(rm *risk.Manager) Option {
+	return func(o *OMS) { o.riskMgr = rm }
 }
 
 // New cria o OMS sobre um broker, emitindo eventos via emit. O emit devolve
@@ -195,6 +205,34 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 		return nil, err
 	}
 
+	// F4: camada de risco — exposição/drawdown/rate limit local (fail rápido,
+	// antes da saga de intent, sem gastar recursos nem tocar a exchange).
+	if o.riskMgr != nil {
+		notional := req.Price.Mul(req.Quantity)
+		if req.Type == domain.OrderMarket && !notional.IsPositive() {
+			// market sem preço: estima pelo preço corrente (se o broker expõe).
+			// Se NÃO houver preço, fail-closed — não dá para medir exposição,
+			// e a casa prefere bloquear a arriscar às cegas.
+			if pp, ok := o.broker.(exchange.PriceProvider); ok {
+				if p, err := pp.Price(ctx, req.Symbol); err == nil {
+					notional = p.Mul(req.Quantity)
+				}
+			}
+			if !notional.IsPositive() {
+				o.mu.Lock()
+				delete(o.pending, req.ClientOrderID)
+				o.mu.Unlock()
+				return nil, errors.Join(ErrOrderTooLarge, errors.New("sem preço de referência para medir exposição (market order) — aguarde market data ou use ordem limit com preço"))
+			}
+		}
+		if err := o.riskMgr.Check(notional, o.positionSnapshot(), o.openOrderCount()); err != nil {
+			o.mu.Lock()
+			delete(o.pending, req.ClientOrderID)
+			o.mu.Unlock()
+			return nil, err
+		}
+	}
+
 	// FASE 1 (pré-broker): intent durável — a âncora que fecha a janela de
 	// crash. Se falhar, NÃO enviamos à exchange: falha limpa, sem ordem
 	// fantasma.
@@ -225,6 +263,9 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 
 	// FASE 3 (pós-broker): sucesso → adota + rastro + intent 'submitted'.
 	o.registerOrder(req, ord)
+	if o.riskMgr != nil {
+		o.riskMgr.RegisterOrder() // rate limit local (F4)
+	}
 	if err := o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord}); err != nil {
 		// Fail-parado: a ordem EXISTE na exchange, mas o rastro durável falhou.
 		// Não reportamos sucesso; o intent permanece 'pending' e o Reconcile
@@ -599,6 +640,12 @@ func (o *OMS) Orders() []domain.Order {
 func (o *OMS) Positions() []domain.Position {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.positionSnapshot()
+}
+
+// positionSnapshot devolve uma cópia das posições abertas — deve ser chamado
+// com o lock já garantido (RLock). Usado pela camada de risco (F4).
+func (o *OMS) positionSnapshot() []domain.Position {
 	out := make([]domain.Position, 0, len(o.positions))
 	for _, p := range o.positions {
 		if p.IsOpen() {
@@ -606,6 +653,17 @@ func (o *OMS) Positions() []domain.Position {
 		}
 	}
 	return out
+}
+
+// openOrderCount devolve quantas ordens estão abertas (não terminais).
+func (o *OMS) openOrderCount() int {
+	n := 0
+	for _, ord := range o.orders {
+		if !ord.IsClosed() {
+			n++
+		}
+	}
+	return n
 }
 
 // Position devolve a posição de um símbolo+exchange e se existe.

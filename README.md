@@ -300,6 +300,42 @@ real exige decisão consciente do operador.
   posição o OMS coloca um STOP no lado oposto a `pct%` do preço médio de
   entrada.
 
+## Fase 4 — Camada de risco (proteção do capital)
+
+A camada de risco (`internal/risk`) protege o capital antes de cada ordem e
+continuamente durante a operação. Vale em **todos** os modos (paper, testnet,
+live). Regras:
+
+| Regra | Env | Default |
+|-------|-----|---------|
+| **Exposição por símbolo** — notional da ordem ≤ % do equity | `COSCA_TRADER_MAX_EXPOSURE_PCT` | 0.20 (20%) |
+| **Exposição total** — soma das posições + ordem ≤ % do equity | `COSCA_TRADER_MAX_TOTAL_EXPOSURE_PCT` | 0.50 (50%) |
+| **Drawdown máximo** — do pico de equity; ao atingir, trading é PAUSADO | `COSCA_TRADER_MAX_DRAWDOWN_PCT` | 0.10 (10%) |
+| **Ordens abertas** — máximo simultâneo | (fixo) | 10 |
+| **Rate limit local** — máx. ordens por minuto | (fixo) | 30 |
+
+Como funciona:
+
+1. **Fail-closed:** sem equity disponível, novas ordens são bloqueadas
+   (`ErrEquityUnavailable`) — a casa nunca opera às cegas.
+2. **Antes de cada ordem** o `PlaceOrder` consulta o risk manager: exposição
+   pós-ordem, drawdown, ordens abertas e rate limit. Violou → ordem rejeitada
+   com o erro da regra, **sem gastar client_order_id nem tocar a exchange**.
+3. **A cada tick de mercado** o equity é reavaliado (pico e drawdown). Ao
+   cruzar o drawdown máximo, o trading é **pausado** (`RiskBreach` no rastro)
+   e só volta com `Resume` manual (ou se o equity se recuperar e o operador
+   destravar).
+4. **`GET /risk`** (autenticado) devolve o estado: equity, pico, drawdown %,
+   trading pausado + razão, ordens/min.
+
+O frontend mostra o card **Risco** com o drawdown % (em amarelo acima de 50%
+do limite) e um **banner vermelho "TRADING PAUSADO"** quando o risco trava a
+operação.
+
+> **Nota (fail-open corrigido):** ordem market sem preço de referência era
+> medida como exposição zero (furo). Agora, sem preço corrente, o sistema
+> **bloqueia** a ordem — melhor parar do que arriscar às cegas.
+
 ## Regra de negócio (pesquisa)
 
 Falta conhecimento? Buscar no GitHub por estrelas:

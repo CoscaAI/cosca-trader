@@ -89,6 +89,21 @@ export type PaperSummary = {
   trades: Trade[];
 };
 
+// RiskState é o estado da camada de risco (F4) — /risk.
+export type RiskState = {
+  equity: string;
+  peak_equity: string;
+  drawdown_pct: string;
+  trading_halted: boolean;
+  halt_reason?: string;
+  open_orders: number;
+  orders_last_min: number;
+  max_drawdown_pct: string;
+  max_exposure_pct: string;
+  max_total_exposure_pct: string;
+  max_open_orders: number;
+};
+
 // StreamEvent é a unidade do SSE /events — o mesmo Event do rastro do core.
 export type StreamEvent = {
   id: string;

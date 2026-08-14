@@ -33,6 +33,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/market"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
+	"github.com/CoscaAI/cosca-trader/internal/risk"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 	"github.com/CoscaAI/cosca-trader/internal/strategy"
 )
@@ -147,6 +148,7 @@ func main() {
 	// ambiente escolhido. O OMS não distingue um do outro.
 	var omsEngine *oms.OMS
 	var paperBroker *paper.Broker
+	var riskMgr *risk.Manager
 	mode := "observe"
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_API_SECRET")
@@ -160,6 +162,10 @@ func main() {
 		// TODO ambiente com persistência.
 		if db != nil {
 			opts = append(opts, oms.WithIntentStore(db))
+		}
+		// F4: camada de risco — exposição/drawdown/rate limit (se ativa).
+		if riskMgr != nil {
+			opts = append(opts, oms.WithRiskManager(riskMgr))
 		}
 		return opts
 	}
@@ -176,6 +182,23 @@ func main() {
 			paper.WithSlippage(paperSlippage()),
 			paper.WithLimitFillFraction(paperLimitFillFraction()),
 		)
+		// F4: risco ativo no paper — equity vem do broker simulado.
+		riskMgr = risk.New(risk.Config{
+			MaxExposurePct:      riskExposurePct(),
+			MaxTotalExposurePct: riskTotalExposurePct(),
+			MaxDrawdownPct:      riskMaxDrawdownPct(),
+			MaxOpenOrders:       10,
+			MaxOrdersPerMinute:  30,
+			EquityProvider: func() decimal.Decimal {
+				s := paperBroker.Summary()
+				return s.Equity
+			},
+			Emit: func(evType, sev string, payload any) {
+				if err := e.Emit(event.Event{Type: event.Type(evType), Source: "risk", Severity: sev, Payload: payload}); err != nil {
+					log.Printf("⚠ risk: %v", err)
+				}
+			},
+		})
 		omsEngine = oms.New(paperBroker, e.Emit, omsOpts()...)
 		omsEngine.SetKillSwitch(os.Getenv("COSCA_TRADER_KILL") == "1")
 
@@ -216,6 +239,30 @@ func main() {
 			log.Printf("COSCA TRADER — modo SEGURO: forçando sandbox (testnet). Para produção use --live.")
 		}
 		tc := binance.NewTrading(apiKey, apiSecret, env)
+		// F4: risco ativo na Binance também — equity estimado pelos saldos
+		// (USDT + stablecoins valem 1; outros ativos entram na próxima rodada
+		// de mark). Fail-closed: sem saldo conhecido, o Check bloqueia ordens.
+		riskMgr = risk.New(risk.Config{
+			MaxExposurePct:      riskExposurePct(),
+			MaxTotalExposurePct: riskTotalExposurePct(),
+			MaxDrawdownPct:      riskMaxDrawdownPct(),
+			MaxOpenOrders:       10,
+			MaxOrdersPerMinute:  30,
+			EquityProvider: func() decimal.Decimal {
+				eq := decimal.Zero
+				for _, b := range omsEngine.Balances() {
+					// stablecoins e moedas de conta valem 1; o mark real por
+					// ativo fica para a fase de reconciliação de equity.
+					eq = eq.Add(b.Free).Add(b.Locked)
+				}
+				return eq
+			},
+			Emit: func(evType, sev string, payload any) {
+				if err := e.Emit(event.Event{Type: event.Type(evType), Source: "risk", Severity: sev, Payload: payload}); err != nil {
+					log.Printf("⚠ risk: %v", err)
+				}
+			},
+		})
 		omsEngine = oms.New(tc, e.Emit, omsOpts()...)
 		omsEngine.SetKillSwitch(os.Getenv("COSCA_TRADER_KILL") == "1")
 
@@ -314,6 +361,21 @@ func main() {
 		})
 	}
 
+	// F4 — o drawdown é medido a cada tick de equity: o risk manager rastreia
+	// o pico e trava o trading quando o drawdown cruza o limite. Vale em todo
+	// modo (paper + Binance) quando o manager existe.
+	if riskMgr != nil && omsEngine != nil {
+		riskMgr.OnTick()
+		e.Bus.Subscribe(event.MarketTick, func(ev event.Event) {
+			riskMgr.OnTick()
+		})
+		// tambem no position update (fills mudam o equity antes do próximo tick)
+		e.Bus.Subscribe(event.PositionUpdated, func(ev event.Event) {
+			riskMgr.OnTick()
+		})
+		log.Printf("F4 — camada de risco ativa: drawdown max %s, exposição %s/símbolo, %s total", riskMaxDrawdownPct(), riskExposurePct(), riskTotalExposurePct())
+	}
+
 	// Replay + reconciliação iniciais valem para PAPER e para Binance: no
 	// papel o Reconcile adota ordens de intents órfãs consultando o próprio
 	// broker simulado.
@@ -350,7 +412,7 @@ func main() {
 		}()
 	}
 
-	serve(e, omsEngine, paperBroker, *port, apiSecurity{
+	serve(e, omsEngine, paperBroker, riskMgr, *port, apiSecurity{
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	}, mode)
@@ -461,6 +523,55 @@ func stopLossPct() decimal.Decimal {
 	if err != nil || v.Sign() < 0 {
 		log.Printf("⚠ COSCA_TRADER_STOP_LOSS_PCT inválido (%q) — desativado", raw)
 		return decimal.Zero
+	}
+	return v
+}
+
+// riskExposurePct lê a fração máxima do equity em posição por símbolo (F4).
+// Default: 0.20 (20%). Zero desativa a regra.
+func riskExposurePct() decimal.Decimal {
+	const def = "0.20"
+	raw := os.Getenv("COSCA_TRADER_MAX_EXPOSURE_PCT")
+	if raw == "" {
+		return decimal.RequireFromString(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_MAX_EXPOSURE_PCT inválido (%q) — usando %s", raw, def)
+		return decimal.RequireFromString(def)
+	}
+	return v
+}
+
+// riskTotalExposurePct lê a fração máxima do equity em posição no total da
+// carteira (F4). Default: 0.50 (50%). Zero desativa a regra.
+func riskTotalExposurePct() decimal.Decimal {
+	const def = "0.50"
+	raw := os.Getenv("COSCA_TRADER_MAX_TOTAL_EXPOSURE_PCT")
+	if raw == "" {
+		return decimal.RequireFromString(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_MAX_TOTAL_EXPOSURE_PCT inválido (%q) — usando %s", raw, def)
+		return decimal.RequireFromString(def)
+	}
+	return v
+}
+
+// riskMaxDrawdownPct lê o drawdown máximo do pico de equity (F4). Ao atingir,
+// o trading é pausado (Halt) e RiskBreach é emitido. Default: 0.10 (10%).
+// Zero desativa a regra.
+func riskMaxDrawdownPct() decimal.Decimal {
+	const def = "0.10"
+	raw := os.Getenv("COSCA_TRADER_MAX_DRAWDOWN_PCT")
+	if raw == "" {
+		return decimal.RequireFromString(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_MAX_DRAWDOWN_PCT inválido (%q) — usando %s", raw, def)
+		return decimal.RequireFromString(def)
 	}
 	return v
 }

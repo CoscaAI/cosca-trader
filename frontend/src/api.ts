@@ -9,6 +9,7 @@ import type {
   OrderRequest,
   PaperSummary,
   Position,
+  RiskState,
   StreamEvent,
 } from "./types";
 
@@ -43,6 +44,10 @@ export class CoreClient {
 
   async paper(): Promise<PaperSummary> {
     return this.get<PaperSummary>("/paper");
+  }
+
+  async risk(): Promise<RiskState> {
+    return this.get<RiskState>("/risk");
   }
 
   async placeOrder(body: OrderRequest): Promise<Order> {

@@ -23,6 +23,7 @@ import type {
   OrderRequest,
   PaperSummary,
   Position,
+  RiskState,
   StreamEvent,
   TickPayload,
 } from "./types";
@@ -262,6 +263,56 @@ function PaperCard({ paper }: { paper: PaperSummary | null }) {
   );
 }
 
+function RiskCard({ risk }: { risk: RiskState | null }) {
+  if (!risk) {
+    return <p className="empty">camada de risco não ativa</p>;
+  }
+  const dd = pct(risk.drawdown_pct);
+  const maxDd = pct(risk.max_drawdown_pct);
+  const ddWarn = dd >= maxDd * 0.5;
+  return (
+    <div className="metrics-grid">
+      {risk.trading_halted && (
+        <div className="risk-banner">
+          ⛔ TRADING PAUSADO — {risk.halt_reason ?? "regra de risco"}
+        </div>
+      )}
+      <div className="metric">
+        <span className="k">drawdown</span>
+        <span className={`v ${ddWarn ? "warn" : ""}`}>
+          {fmtPct(dd)} <small>de {fmtPct(maxDd)}</small>
+        </span>
+      </div>
+      <div className="metric">
+        <span className="k">exposição máx/símbolo</span>
+        <span className="v">{fmtPct(pct(risk.max_exposure_pct))}</span>
+      </div>
+      <div className="metric">
+        <span className="k">exposição máx total</span>
+        <span className="v">{fmtPct(pct(risk.max_total_exposure_pct))}</span>
+      </div>
+      <div className="metric">
+        <span className="k">ordens/min</span>
+        <span className="v">
+          {risk.orders_last_min}
+          <small> máx {risk.max_open_orders} abertas</small>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// fmtPct formata uma fração decimal (0.10) como percentual (10%).
+function fmtPct(f: number): string {
+  return `${(f * 100).toFixed(1)}%`;
+}
+
+// pct converte string decimal do core ("0.10") em número.
+function pct(s: string): number {
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function OrdersPanel({
   client,
   orders,
@@ -416,6 +467,7 @@ export default function App() {
   const [balances, setBalances] = useState<Balance[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [paper, setPaper] = useState<PaperSummary | null>(null);
+  const [risk, setRisk] = useState<RiskState | null>(null);
   const [candles, setCandles] = useState<CandlePayload[]>([]);
   const [lastPrice, setLastPrice] = useState<TickPayload | null>(null);
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
@@ -450,6 +502,11 @@ export default function App() {
       setPaper(pp.mode === "paper" ? pp : null);
     } catch {
       setPaper(null);
+    }
+    try {
+      setRisk(await client.risk());
+    } catch {
+      setRisk(null);
     }
   }, [client, token]);
 
@@ -569,6 +626,11 @@ export default function App() {
         <section className="card">
           <h2>Paper</h2>
           <PaperCard paper={paper} />
+        </section>
+
+        <section className="card">
+          <h2>Risco</h2>
+          <RiskCard risk={risk} />
         </section>
 
         <section className="card orders-card">

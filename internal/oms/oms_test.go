@@ -14,6 +14,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/risk"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
@@ -1080,5 +1081,82 @@ func TestApplyOrderUpdateMarksIntentDone(t *testing.T) {
 	it, _ := is.get("cli-done")
 	if it.Status != store.IntentDone {
 		t.Errorf("intent status = %q, esperava done após terminal", it.Status)
+	}
+}
+
+func TestPlaceOrderRiskExposureBlocks(t *testing.T) {
+	// F4: ordem com notional > % de exposição é bloqueada ANTES do broker.
+	equity := d("10000")
+	rm := risk.New(risk.Config{
+		MaxExposurePct:      d("0.20"), // 20% = 2000 USDT
+		MaxTotalExposurePct: d("0.50"),
+		EquityProvider:      func() decimal.Decimal { return equity },
+	})
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) error { return nil }, WithRiskManager(rm))
+
+	// limit 0.05 @ 50000 = 2500 notional = 25% > 20% → bloqueia
+	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("0.05"), Price: d("50000"), ClientOrderID: "cli-exp-1",
+	})
+	if !errors.Is(err, risk.ErrExposureExceeded) {
+		t.Fatalf("esperava ErrExposureExceeded, got %v", err)
+	}
+	if len(b.placed) != 0 {
+		t.Fatalf("ordem não deveria chegar ao broker: %+v", b.placed)
+	}
+
+	// dentro do limite: 0.03 @ 50000 = 1500 = 15% < 20% → passa
+	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("0.03"), Price: d("50000"), ClientOrderID: "cli-exp-2",
+	})
+	if err != nil {
+		t.Fatalf("ordem dentro do limite deveria passar: %v", err)
+	}
+	if ord.Status != domain.OrderNew {
+		t.Fatalf("esperava OrderNew, got %s", ord.Status)
+	}
+}
+
+func TestPlaceOrderRiskDrawdownHalts(t *testing.T) {
+	// F4: drawdown breach trava o trading — PlaceOrder bloqueia com
+	// ErrDrawdownBreach até o Resume.
+	equity := d("10000")
+	rm := risk.New(risk.Config{
+		MaxDrawdownPct: d("0.10"),
+		EquityProvider: func() decimal.Decimal { return equity },
+	})
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) error { return nil }, WithRiskManager(rm))
+
+	// equity cai 15% → breach → halt
+	equity = d("8500")
+	rm.OnEquityUpdate(equity)
+	st := rm.State()
+	if !st.TradingHalted {
+		t.Fatal("esperava trading halted após drawdown breach")
+	}
+
+	_, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("0.01"), Price: d("50000"), ClientOrderID: "cli-dd-1",
+	})
+	if !errors.Is(err, risk.ErrDrawdownBreach) {
+		t.Fatalf("esperava ErrDrawdownBreach, got %v", err)
+	}
+	if len(b.placed) != 0 {
+		t.Fatalf("ordem não deveria chegar ao broker com trading halted: %+v", b.placed)
+	}
+
+	// Resume destrava
+	rm.Resume()
+	equity = d("10000")
+	if _, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: d("0.01"), Price: d("50000"), ClientOrderID: "cli-dd-2",
+	}); err != nil {
+		t.Fatalf("após Resume a ordem deveria passar: %v", err)
 	}
 }

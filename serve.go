@@ -17,6 +17,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
+	"github.com/CoscaAI/cosca-trader/internal/risk"
 )
 
 // apiSecurity carrega a política de segurança HTTP do core. Preenchida no
@@ -26,8 +27,8 @@ type apiSecurity struct {
 	allowedOrigins []string
 }
 
-func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec apiSecurity, mode string) {
-	mux := newMux(e, o, pb, port, sec, mode)
+func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, port string, sec apiSecurity, mode string) {
+	mux := newMux(e, o, pb, rm, port, sec, mode)
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
 }
@@ -35,7 +36,7 @@ func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec apiS
 // newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
 // sem subir o listener. /health é público; todos os demais endpoints passam
 // pela política de segurança (origem + token).
-func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec apiSecurity, mode string) *http.ServeMux {
+func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, port string, sec apiSecurity, mode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /health — estado do core. Público (liveness, sem dados sensíveis).
@@ -167,6 +168,16 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec api
 			return
 		}
 		writeJSON(w, pb.Summary())
+	}))
+
+	// /risk — estado da camada de risco (F4): equity, pico, drawdown, exposição,
+	// trading pausado e a razão. O frontend usa para o painel de risco.
+	mux.HandleFunc("/risk", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if rm == nil {
+			http.Error(w, "camada de risco não ativa", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, rm.State())
 	}))
 
 	return mux
