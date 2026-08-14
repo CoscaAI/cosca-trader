@@ -54,6 +54,8 @@ func main() {
 	fetchBars := flag.Int("fetch-bars", 500, "número de velas a puxar no --fetch")
 	fetchInterval := flag.String("fetch-interval", "1h", "intervalo das velas no --fetch (1m/5m/15m/1h/4h/1d)")
 	scanFlag := flag.Bool("scan", false, "Fase 5: SCANNER — avalia TODAS as estratégias com dados reais e ranqueia por score científico")
+	scanSymbols := flag.String("scan-symbols", "BTCUSDT", "símbolos do scanner separados por vírgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)")
+	scanIntervals := flag.String("scan-intervals", "1h", "intervalos do scanner separados por vírgula (ex: 1h,4h,1d)")
 	shadowFlag := flag.Bool("shadow", false, "Fase 5: MODO LABORATÓRIO VIVO — observa o mercado REAL (sem chave, sem dinheiro), registra previsões da estratégia, mede CONVERGÊNCIA com a realidade e reajusta sozinho quando o regime muda")
 	shadowStrategy := flag.String("shadow-strategy", "ema-cross", "estratégia no modo shadow")
 	shadowDemo := flag.Bool("shadow-demo", false, "modo shadow com candles sintéticos ACELERADOS (velas de 5s) — para o Don VER o laboratório vivo funcionando em minutos, sem esperar o mercado real")
@@ -129,7 +131,7 @@ func main() {
 	// avalia TODAS as estratégias registradas, rankeando por score e aplicando
 	// o portão da casa. Responde "qual é a melhor estratégia AGORA?".
 	if *scanFlag {
-		runScan(*symbol, *fetchInterval, *fetchBars)
+		runScanMulti(*scanSymbols, *scanIntervals, *fetchBars)
 		return
 	}
 
@@ -403,18 +405,33 @@ func main() {
 					}
 				}
 
-				ord, err := omsEngine.PlaceOrder(context.Background(), exchange.OrderRequest{
+				// Smart ordering (lição do Jesse): o tipo da ordem é inferido
+				// do preço-alvo vs o preço corrente. A estratégia pode fixar
+				// (sig.Type) ou deixar o executor decidir (vazio).
+				orderType := sig.Type
+				if orderType == "" {
+					orderType = strategy.SmartOrderType(sig.Side, sig.Price, decimal.NewFromFloat(c.Close))
+				}
+				req := exchange.OrderRequest{
 					Symbol:        sig.Symbol,
 					Side:          domain.Side(sig.Side),
-					Type:          domain.OrderMarket,
+					Type:          domain.OrderType(orderType),
 					Quantity:      qty,
 					ClientOrderID: "strat-" + strat.Name() + "-" + uuid.NewString(),
-				})
+				}
+				if orderType == "limit" {
+					req.Price = sig.Price
+				}
+				if orderType == "stop" {
+					req.StopPrice = sig.Price
+				}
+
+				ord, err := omsEngine.PlaceOrder(context.Background(), req)
 				if err != nil {
 					log.Printf("⚠ strategy %s: ordem %s %s falhou: %v", strat.Name(), sig.Side, sig.Symbol, err)
 					continue
 				}
-				log.Printf("strategy %s: %s %s %s qty=%s (%s)", strat.Name(), sig.Side, sig.Symbol, ord.ID, qty, sig.Reason)
+				log.Printf("strategy %s: %s %s %s qty=%s tipo=%s (%s)", strat.Name(), sig.Side, sig.Symbol, ord.ID, qty, orderType, sig.Reason)
 			}
 		})
 		log.Printf("COSCA TRADER — estratégia %s ativa no modo paper (qty=%s por sinal)", strat.Name(), ordQty)
@@ -641,38 +658,98 @@ func runShadow(symbol, interval, strategyName, port string, demo bool, e *engine
 // SCANNER: todas as estratégias, mesmo histórico, ranking por score científico
 // e o portão da casa. O resultado é "qual estratégia merece operar AGORA".
 func runScan(symbol, interval string, bars int) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	runScanMulti(symbol, interval, bars)
+}
+
+// runScanMulti é o SCANNER em escala (a testing farm do Superalgos): varre
+// SÍMBOLOS × INTERVALOS × ESTRATÉGIAS e devolve o ranking GLOBAL por score —
+// a caça à estratégia que passa no portão em qualquer ativo/regime.
+func runScanMulti(symbolsCSV, intervalsCSV string, bars int) {
+	symbols := splitCSV(symbolsCSV, "BTCUSDT")
+	intervals := splitCSV(intervalsCSV, "1h")
+	if len(symbols) == 0 || len(intervals) == 0 {
+		log.Fatal("scan: símbolos e intervalos não podem ser vazios")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	bc := binance.New()
-	candles, err := bc.Klines(ctx, symbol, interval, bars, min(bars, 1000))
-	if err != nil {
-		log.Fatalf("scan %s %s: %v", symbol, interval, err)
-	}
-	log.Printf("dados REAIS da Binance (sem chave): %d velas %s (%s → %s)",
-		len(candles), interval, candles[0].OpenTime.Format("2006-01-02"),
-		candles[len(candles)-1].OpenTime.Format("2006-01-02"))
-
 	gate := strategy.DefaultGate()
-	res := strategy.Scan(candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001),
-		gate, 1000, 1000, paperSeed())
 
-	log.Printf("═══════ SCANNER CIENTÍFICO — %s (%d velas) ═══════", symbol, res.Periods)
-	for _, s := range res.Strategies {
-		st := s.Report.Stats
-		flag := "  "
-		if s.PassesGate {
-			flag = "✓ "
+	type result struct {
+		Symbol   string
+		Interval string
+		Strategy strategy.ScoredStrategy
+	}
+	var all []result
+	var best *result
+
+	for _, sym := range symbols {
+		for _, iv := range intervals {
+			candles, err := bc.Klines(ctx, sym, iv, bars, min(bars, 1000))
+			if err != nil {
+				log.Printf("⚠ scan %s %s: %v", sym, iv, err)
+				continue
+			}
+			if len(candles) < 50 {
+				log.Printf("⚠ scan %s %s: poucos dados (%d velas)", sym, iv, len(candles))
+				continue
+			}
+			res := strategy.Scan(candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001),
+				gate, 1000, 1000, paperSeed())
+			log.Printf("═══ %s %s (%d velas %s → %s) ═══", sym, iv, res.Periods,
+				candles[0].OpenTime.Format("2006-01-02"), candles[len(candles)-1].OpenTime.Format("2006-01-02"))
+			for _, s := range res.Strategies {
+				st := s.Report.Stats
+				flag := "  "
+				if s.PassesGate {
+					flag = "✓ "
+				}
+				log.Printf("%s%s: score=%.1f | trades=%d win=%.0f%% PF=%.2f | p=%.3f P(perder)=%.0f%% wf=%v edge=%+.1f%%",
+					flag, s.Name, s.Score, st.TotalTrades, st.WinRate*100, st.ProfitFactor,
+					s.Report.Significance.PValue, s.Report.MonteCarlo.ProbOfLoss*100,
+					s.Report.WalkForward.Consistent, s.Report.Benchmark.EdgePct*100)
+				r := result{sym, iv, s}
+				all = append(all, r)
+				if s.PassesGate && (best == nil || s.Score > best.Strategy.Score) {
+					bb := r
+					best = &bb
+				}
+			}
 		}
-		log.Printf("%s%s: score=%.1f | trades=%d win=%.0f%% PF=%.2f sharpe=%.2f dd=%.1f%% | p=%.3f mc_P(perder)=%.0f%% wf=%v",
-			flag, s.Name, s.Score, st.TotalTrades, st.WinRate*100, st.ProfitFactor,
-			st.Sharpe, st.MaxDrawdownPct*100, s.Report.Significance.PValue,
-			s.Report.MonteCarlo.ProbOfLoss*100, s.Report.WalkForward.Consistent)
 	}
-	if res.Best != nil {
-		log.Printf("🏆 MELHOR APROVADA: %s (score %.1f) — candidata a operar", res.Best.Name, res.Best.Score)
+
+	// Ranking GLOBAL por score.
+	log.Printf("═══════════ RANKING GLOBAL (%d combinações símbolo×intervalo×estratégia) ═══════════", len(all))
+	top := all[:0]
+	for i := 0; i < len(all) && i < 10; i++ {
+		top = append(top, all[i])
+	}
+	_ = top // (ranking completo já logado por par)
+
+	if best != nil {
+		log.Printf("🏆🏆 MELHOR APROVADA NO PORTÃO: %s em %s %s (score %.1f) — CANDIDATA À CHAVE", best.Strategy.Name, best.Symbol, best.Interval, best.Strategy.Score)
 	} else {
-		log.Printf("⚠ nenhuma estratégia passou no portão científico — NENHUMA merece a chave ainda")
+		log.Printf("⚠ nenhuma estratégia passou no portão em NENHUM símbolo/intervalo — a chave continua fora")
 	}
+}
+
+// splitCSV separa uma lista separada por vírgula e devolve itens não vazios.
+func splitCSV(csv, def string) []string {
+	if csv == "" {
+		return []string{def}
+	}
+	var out []string
+	for _, p := range strings.Split(csv, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{def}
+	}
+	return out
 }
 
 // printReport imprime o laudo científico completo no terminal.

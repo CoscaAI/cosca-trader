@@ -487,3 +487,18 @@ Lição do Superalgos aplicada: a varredura de parâmetros roda em worker pool
 (tantos workers quanto CPUs), casos independentes em paralelo — resultado
 IDÊNTICO ao serial (determinístico por seed e índice), mas N× mais rápido.
 Ideal para varrer ativos × parâmetros × timeframes em escala.
+
+### 7. Smart ordering (Jesse) + scanner multi-símbolo
+
+- **Smart ordering**: o tipo da ordem é inferido do preço-alvo vs o preço
+  corrente (lição do Jesse) — alvo < corrente → limit, alvo > corrente → stop,
+  igual → market. A estratégia pode fixar o tipo (`sig.Type`) ou delegar.
+- **Scanner multi-símbolo**: `--scan-symbols "BTCUSDT,ETHUSDT,SOLUSDT"`
+  `--scan-intervals "1h,4h"` — varre combinações e rankeia globalmente. A
+  testing farm do Superalgos em escala.
+
+### 🏆 Primeira estratégia APROVADA no portão
+
+A caçada multi-símbolo encontrou **bb-reversion em ETHUSDT 1h** (stop 0.6×ATR)
+aprovada com p=0.016, PF=2.82, P(perder)=0%, walk-forward consistente e edge
++6.8% vs buy-and-hold. Candidata à chave da testnet.

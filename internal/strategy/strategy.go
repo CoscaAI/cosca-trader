@@ -27,7 +27,32 @@ type Strategy interface {
 type Signal struct {
 	Symbol string          `json:"symbol"`
 	Side   string          `json:"side"` // "buy" | "sell"
+	Type   string          `json:"type,omitempty"` // "market"|"limit"|"stop"; vazio = smart order
 	Price  decimal.Decimal `json:"price"`
 	Stop   decimal.Decimal `json:"stop,omitempty"`
 	Reason string          `json:"reason"`
+}
+
+// SmartOrderType infere o tipo de ordem a partir do preço-alvo vs o preço
+// corrente (lição do Jesse: "smart ordering"). Um sinal de COMPRA:
+//   - preço-alvo == corrente  → market (entrar já)
+//   - preço-alvo < corrente   → limit (comprar mais barato que o mercado)
+//   - preço-alvo > corrente   → stop (comprar só se romper acima)
+//
+// E o espelho para VENDA. Retorna "market", "limit" ou "stop".
+func SmartOrderType(side string, target, current decimal.Decimal) string {
+	if target.IsZero() || current.IsZero() || target.Equal(current) {
+		return "market"
+	}
+	if side == "buy" {
+		if target.LessThan(current) {
+			return "limit"
+		}
+		return "stop"
+	}
+	// sell
+	if target.GreaterThan(current) {
+		return "limit"
+	}
+	return "stop"
 }
