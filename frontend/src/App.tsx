@@ -5,13 +5,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import GridLayout from "react-grid-layout";
+import { WidthProvider } from "react-grid-layout/legacy";
 
-// O @types do react-grid-layout está defasado (não reconhece props nem o
-// WidthProvider). O runtime expõe tudo via module.exports — acessamos o
-// WidthProvider pelo default (eslint-disabled por pragmatismo documentado).
+// O @types do react-grid-layout está defasado (não reconhece props). O
+// GridLayout padrão (ESM) NÃO exporta WidthProvider — o subpath /legacy tem.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GLPkg = GridLayout as any;
-const Grid = GLPkg.WidthProvider(GLPkg) as React.ComponentType<any>;
+const Grid = WidthProvider(GridLayout) as React.ComponentType<any>;
 
 // Shape de um item do layout (x/y/w/h + mínimos) — o array do painel.
 type GridLayoutItem = {
