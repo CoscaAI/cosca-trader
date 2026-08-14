@@ -13,6 +13,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
+	"github.com/CoscaAI/cosca-trader/internal/paper"
 )
 
 // apiSecurity carrega a política de segurança HTTP do core. Preenchida no
@@ -22,8 +23,8 @@ type apiSecurity struct {
 	allowedOrigins []string
 }
 
-func serve(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) {
-	mux := newMux(e, o, port, sec)
+func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec apiSecurity, mode string) {
+	mux := newMux(e, o, pb, port, sec, mode)
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
 }
@@ -31,7 +32,7 @@ func serve(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) {
 // newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
 // sem subir o listener. /health é público; todos os demais endpoints passam
 // pela política de segurança (origem + token).
-func newMux(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) *http.ServeMux {
+func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, port string, sec apiSecurity, mode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /health — estado do core. Público (liveness, sem dados sensíveis).
@@ -40,6 +41,7 @@ func newMux(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) *http.Se
 		writeJSON(w, map[string]any{
 			"ok":          true,
 			"service":     "cosca-trader",
+			"mode":        mode, // "live" | "testnet" | "paper" | "observe"
 			"port":        port,
 			"events":      e.Store.Len(),
 			"first_event": first,
@@ -150,6 +152,16 @@ func newMux(e *engine.Engine, o *oms.OMS, port string, sec apiSecurity) *http.Se
 			"balances": o.Ledger().Balances(),
 			"entries":  o.Ledger().Entries(),
 		})
+	}))
+
+	// /paper — resumo do modo paper (Fase 2B): capital inicial, capital atual,
+	// PnL total e trades simulados. Protegido por auth como os demais.
+	mux.HandleFunc("/paper", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if pb == nil {
+			http.Error(w, "modo paper não ativo (rode com --paper)", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, pb.Summary())
 	}))
 
 	return mux

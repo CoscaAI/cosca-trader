@@ -149,6 +149,12 @@ func Open(path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Vários produtores (market data + user stream + OMS) escrevem no mesmo
+	// SQLite — aguardar o lock concorrente evita SQLITE_BUSY espúrio em WAL.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schemaDDL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrar schema: %w", err)

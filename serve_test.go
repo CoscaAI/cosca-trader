@@ -3,12 +3,16 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
+	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/store"
 )
 
@@ -20,7 +24,7 @@ func newTestMux(t *testing.T, sec apiSecurity) *http.ServeMux {
 	}
 	e := engine.New(db)
 	e.Emit(event.Event{Type: event.SystemStarted, Source: "test"})
-	return newMux(e, nil, "0", sec)
+	return newMux(e, nil, nil, "0", sec, "observe")
 }
 
 // doGET executa uma requisição GET com cabeçalhos opcionais.
@@ -43,7 +47,7 @@ func TestHealthIsPublic(t *testing.T) {
 }
 
 func TestSensitiveEndpointsRequireToken(t *testing.T) {
-	for _, path := range []string{"/timeline", "/orders", "/positions", "/balances", "/ledger"} {
+	for _, path := range []string{"/timeline", "/orders", "/positions", "/balances", "/ledger", "/paper"} {
 		// Fail-closed: sem token configurado → 401.
 		mux := newTestMux(t, apiSecurity{})
 		if rec := doGET(mux, path, nil); rec.Code != http.StatusUnauthorized {
@@ -107,5 +111,55 @@ func TestNoOriginRequestPasses(t *testing.T) {
 	rec := doGET(mux, "/orders", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 		t.Fatalf("request mesmo-origin (sem Origin) não deveria ser bloqueado, veio %d", rec.Code)
+	}
+}
+
+func TestHealthReportsMode(t *testing.T) {
+	mux := newTestMux(t, apiSecurity{})
+	rec := doGET(mux, "/health", nil)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health inválido: %v", err)
+	}
+	if body["mode"] != "observe" {
+		t.Errorf("mode = %v, esperava observe", body["mode"])
+	}
+}
+
+func TestPaperEndpointWithoutPaperMode(t *testing.T) {
+	// /paper existe mas responde 503 quando o modo paper não está ativo.
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	mux := newMux(e, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	rec := doGET(mux, "/paper", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/paper sem modo paper deveria ser 503, veio %d", rec.Code)
+	}
+}
+
+func TestPaperEndpointWithPaperMode(t *testing.T) {
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	pb := paper.New()
+	pb.SetPrice("BTCUSDT", decimal.NewFromFloat(60000))
+	mux := newMux(e, nil, pb, "0", apiSecurity{token: "segredo"}, "paper")
+	rec := doGET(mux, "/paper", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/paper com modo paper deveria ser 200, veio %d", rec.Code)
+	}
+	var s struct {
+		Mode           string `json:"mode"`
+		InitialCapital string `json:"initial_capital"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+		t.Fatalf("/paper inválido: %v", err)
+	}
+	if s.Mode != "paper" {
+		t.Errorf("mode = %q, esperava paper", s.Mode)
+	}
+	if s.InitialCapital == "" {
+		t.Error("initial_capital ausente no /paper")
 	}
 }
