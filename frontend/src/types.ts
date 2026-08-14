@@ -104,6 +104,90 @@ export type RiskState = {
   max_open_orders: number;
 };
 
+// ── Fase 5 — laudo científico (estatística de estratégia) ──────────────────
+
+// Stats: métricas estatísticas do backtest.
+export type BacktestStats = {
+  total_trades: number;
+  wins: number;
+  losses: number;
+  breakeven: number;
+  win_rate: number;
+  gross_profit: string;
+  gross_loss: string;
+  net_pnl: string;
+  profit_factor: number;
+  avg_win: string;
+  avg_loss: string;
+  expectancy: string;
+  fees_paid: string;
+  return_pct: number;
+  max_drawdown_pct: number;
+  max_drawdown_abs: string;
+  best_trade: string;
+  worst_trade: string;
+  sharpe: number;
+  sortino: number;
+  volatility_pct: number;
+  p5: string;
+  p25: string;
+  p50: string;
+  p75: string;
+  p95: string;
+};
+
+export type MonteCarloResult = {
+  simulations: number;
+  initial: string;
+  p5: string;
+  p50: string;
+  p95: string;
+  prob_of_loss: number;
+  prob_ruin: number;
+  worst_equity: string;
+  best_equity: string;
+};
+
+export type SignificanceResult = {
+  trials: number;
+  observed_pnl: string;
+  mean_null_pnl: string;
+  p_value: number;
+  significant: boolean;
+  z_score: number;
+};
+
+export type WalkForwardResult = {
+  train_bars: number;
+  test_bars: number;
+  train_pnl: string;
+  test_pnl: string;
+  test_return_pct: number;
+  train_trades: number;
+  test_trades: number;
+  consistent: boolean;
+};
+
+export type EquityPoint = {
+  index: number;
+  equity: string;
+};
+
+export type BacktestReport = {
+  strategy: string;
+  symbol: string;
+  periods: number;
+  source: string;
+  initial: string;
+  final: string;
+  trade_count: number;
+  stats: BacktestStats;
+  equity_curve: EquityPoint[];
+  monte_carlo: MonteCarloResult;
+  significance: SignificanceResult;
+  walk_forward: WalkForwardResult;
+};
+
 // StreamEvent é a unidade do SSE /events — o mesmo Event do rastro do core.
 export type StreamEvent = {
   id: string;

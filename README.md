@@ -336,6 +336,38 @@ operação.
 > medida como exposição zero (furo). Agora, sem preço corrente, o sistema
 > **bloqueia** a ordem — melhor parar do que arriscar às cegas.
 
+## Fase 5 — A ferramenta científica de probabilidade (laudo estatístico)
+
+Um backtest entrega **1 número**. A ciência entrega a **distribuição e a
+probabilidade**. A Fase 5 transforma o motor em instrumento científico:
+
+```bash
+# CLI — laudo completo no terminal:
+go run . --backtest --symbol BTCUSDT
+
+# HTTP — o mesmo laudo via API (autenticado):
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:14126/backtest?symbol=BTCUSDT"
+```
+
+O laudo (`ScientificReport`) tem 5 camadas:
+
+| Camada | O que responde |
+|--------|----------------|
+| **Stats** | win rate, profit factor, expectância, Sharpe, Sortino, drawdown máx, percentis P5/P25/P50/P75/P95 do PnL por trade |
+| **Monte Carlo** (10k sims) | embaralha a ORDEM dos trades → P(perder), P(ruína), equity P5/P50/P95 — o risco de sequência |
+| **Significância** (bootstrap) | p-value: a vantagem é real ou é o mesmo que sorteio de moeda? p≤0.05 = significativa (95% de confiança) |
+| **Walk-forward** | treina em 70% do histórico, valida nos 30% out-of-sample — vantagem que sobrevive fora da amostra é provável de ser real |
+| **Equity curve** | a curva completa para o gráfico no painel |
+
+**Regra da casa:** nenhuma estratégia vai para testnet/live sem o laudo
+aprovando — `significant=true`, `walk_forward.consistent=true` e
+`monte_carlo.prob_of_loss < 0.5`. A fé não opera aqui; a probabilidade medida
+opera.
+
+O frontend mostra o card **"Ciência — laudo estatístico"** com o veredito
+(VANTAGEM REAL / SEM VANTAGEM), as métricas e o resultado do Monte Carlo.
+
 ## Regra de negócio (pesquisa)
 
 Falta conhecimento? Buscar no GitHub por estrelas:

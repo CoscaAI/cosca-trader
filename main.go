@@ -449,9 +449,10 @@ func main() {
 	}, mode)
 }
 
-// runBacktest roda o backtest mínimo da estratégia ema-cross (Fase 3D, semente
-// do F5) e imprime o resultado. Candles: do rastro persistido (CandleClosed)
-// quando houver; senão sintéticos seedáveis. Sem broker, sem HTTP — CLI only.
+// runBacktest roda o backtest CIENTÍFICO da estratégia ema-cross (Fase 5) e
+// imprime o laudo completo: métricas, distribuição, Monte Carlo, significância
+// e walk-forward. Candles: do rastro persistido (CandleClosed) quando houver;
+// senão sintéticos seedáveis. Sem broker, sem HTTP — CLI only.
 func runBacktest(e *engine.Engine, symbol string) {
 	candles := extractCandles(symbol, e)
 	source := "sintéticos"
@@ -460,9 +461,29 @@ func runBacktest(e *engine.Engine, symbol string) {
 	} else {
 		source = "rastro persistido"
 	}
-	res := strategy.Backtest(strategy.NewEMACross(), candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001))
-	log.Printf("backtest ema-cross %s (%d candles, %s): inicial=%s final=%s pnl=%s trades=%d fee=%s",
-		symbol, len(candles), source, res.Initial, res.Final, res.PnL, res.Trades, res.FeePaid)
+	report := strategy.AnalyzeBacktest(strategy.NewEMACross(), candles,
+		decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), 1000, 1000, paperSeed())
+
+	st := report.Stats
+	log.Printf("═══ LAUDO CIENTÍFICO — %s (%s) ═══", report.Strategy, source)
+	log.Printf("histórico: %d velas %s | inicial=%s final=%s", report.Periods, report.Symbol, report.Initial, report.Final)
+	log.Printf("trades=%d (wins=%d losses=%d) win_rate=%.1f%%", st.TotalTrades, st.Wins, st.Losses, st.WinRate*100)
+	log.Printf("pnl=%s gross=%s loss=%s fees=%s | profit_factor=%.2f expectância=%s", st.NetPnL, st.GrossProfit, st.GrossLoss.Neg(), st.FeesPaid, st.ProfitFactor, st.Expectancy)
+	log.Printf("retorno=%.1f%% max_drawdown=%.1f%% | sharpe=%.2f sortino=%.2f vol=%.4f", st.ReturnPct*100, st.MaxDrawdownPct*100, st.Sharpe, st.Sortino, st.VolatilityPct)
+	log.Printf("distribuição por trade: p5=%s p25=%s p50=%s p75=%s p95=%s", st.P5, st.P25, st.P50, st.P75, st.P95)
+	log.Printf("MONTE CARLO (%d sims): p5=%s p50=%s p95=%s | P(perder)=%.1f%% P(ruína)=%.1f%%", report.MonteCarlo.Simulations, report.MonteCarlo.P5, report.MonteCarlo.P50, report.MonteCarlo.P95, report.MonteCarlo.ProbOfLoss*100, report.MonteCarlo.ProbRuin*100)
+	sig := report.Significance
+	verdict := "NÃO significativa (pode ser sorte)"
+	if sig.Significant {
+		verdict = "SIGNIFICATIVA (vantagem real, p≤0.05)"
+	}
+	log.Printf("SIGNIFICÂNCIA: p-value=%.4f z=%.2f → %s", sig.PValue, sig.ZScore, verdict)
+	wf := report.WalkForward
+	wfVerdict := "INCONSISTENTE (perdeu fora da amostra)"
+	if wf.Consistent {
+		wfVerdict = "consistente (lucrou out-of-sample)"
+	}
+	log.Printf("WALK-FORWARD: treino=%d velas pnl=%s (%d trades) | teste=%d velas pnl=%s (%d trades) → %s", wf.TrainBars, wf.TrainPnL, wf.TrainTrades, wf.TestBars, wf.TestPnL, wf.TestTrades, wfVerdict)
 }
 
 // extractCandles devolve as velas fechadas persistidas de um símbolo, em ordem

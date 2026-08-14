@@ -18,6 +18,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/risk"
+	"github.com/CoscaAI/cosca-trader/internal/strategy"
 )
 
 // apiSecurity carrega a política de segurança HTTP do core. Preenchida no
@@ -178,6 +179,39 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, po
 			return
 		}
 		writeJSON(w, rm.State())
+	}))
+
+	// /backtest — o laudo científico (F5): métricas estatísticas, distribuição,
+	// Monte Carlo, significância e walk-forward da estratégia sobre o histórico
+	// persistido (ou sintético seedável). É a "ferramenta de probabilidade".
+	mux.HandleFunc("/backtest", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		sym := r.URL.Query().Get("symbol")
+		if sym == "" {
+			sym = "BTCUSDT"
+		}
+		candles := extractCandles(sym, e)
+		source := "sintéticos"
+		if len(candles) == 0 {
+			candles = strategy.SyntheticCandles(paperSeed(), sym, 300, demoStartPrice(sym))
+		} else {
+			source = "rastro persistido"
+		}
+		report := strategy.AnalyzeBacktest(strategy.NewEMACross(), candles,
+			decimal.NewFromInt(10000), decimal.NewFromFloat(0.001), 1000, 1000, paperSeed())
+		writeJSON(w, map[string]any{
+			"strategy":      report.Strategy,
+			"symbol":        report.Symbol,
+			"periods":       report.Periods,
+			"source":        source,
+			"initial":       report.Initial,
+			"final":         report.Final,
+			"stats":         report.Stats,
+			"equity_curve":  report.EquityCurve,
+			"monte_carlo":   report.MonteCarlo,
+			"significance":  report.Significance,
+			"walk_forward":  report.WalkForward,
+			"trade_count":   len(report.Trades),
+		})
 	}))
 
 	return mux

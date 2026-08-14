@@ -3,6 +3,7 @@
 // token configurado, enviam Authorization: Bearer.
 
 import type {
+  BacktestReport,
   Balance,
   Health,
   Order,
@@ -48,6 +49,10 @@ export class CoreClient {
 
   async risk(): Promise<RiskState> {
     return this.get<RiskState>("/risk");
+  }
+
+  async backtest(symbol: string): Promise<BacktestReport> {
+    return this.get<BacktestReport>(`/backtest?symbol=${encodeURIComponent(symbol)}`);
   }
 
   async placeOrder(body: OrderRequest): Promise<Order> {

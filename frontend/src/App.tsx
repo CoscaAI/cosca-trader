@@ -16,6 +16,7 @@ import {
 
 import { CoreClient, streamEvents } from "./api";
 import type {
+  BacktestReport,
   Balance,
   CandlePayload,
   Health,
@@ -313,6 +314,85 @@ function pct(s: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+// ScienceCard — o laudo científico (F5): a ferramenta de probabilidade.
+// Mostra win rate, profit factor, Sharpe, Monte Carlo e o veredito de
+// significância — para o Don NUNCA levar estratégia sem vantagem pra frente.
+function ScienceCard({ report }: { report: BacktestReport | null }) {
+  if (!report) {
+    return <p className="empty">laudo científico indisponível</p>;
+  }
+  const st = report.stats;
+  const mc = report.monte_carlo;
+  const sig = report.significance;
+  const wf = report.walk_forward;
+
+  const sigClass = sig.significant ? "pos" : "neg";
+  const wfClass = wf.consistent ? "pos" : "neg";
+  const pnlClassV = st.net_pnl.startsWith("-") ? "neg" : "pos";
+
+  return (
+    <div className="science">
+      <div className="science-verdict">
+        <span className={`v ${sigClass}`}>
+          {sig.significant ? "VANTAGEM REAL" : "SEM VANTAGEM"}
+        </span>
+        <span className="k">
+          p-value {sig.p_value.toFixed(3)} · {st.total_trades} trades ·{" "}
+          {fmtPct(st.win_rate)} win rate
+        </span>
+      </div>
+      <div className="metrics-grid">
+        <div className="metric">
+          <span className="k">PnL líquido</span>
+          <span className={`v ${pnlClassV}`}>{fmtMoney(st.net_pnl)}</span>
+        </div>
+        <div className="metric">
+          <span className="k">profit factor</span>
+          <span className="v">{st.profit_factor.toFixed(2)}</span>
+        </div>
+        <div className="metric">
+          <span className="k">expectância/trade</span>
+          <span className={`v ${st.expectancy.startsWith("-") ? "neg" : "pos"}`}>
+            {fmtMoney(st.expectancy)}
+          </span>
+        </div>
+        <div className="metric">
+          <span className="k">Sharpe</span>
+          <span className={`v ${st.sharpe < 1 ? "neg" : "pos"}`}>{st.sharpe.toFixed(2)}</span>
+        </div>
+        <div className="metric">
+          <span className="k">max drawdown</span>
+          <span className="v">{fmtPct(st.max_drawdown_pct)}</span>
+        </div>
+        <div className="metric">
+          <span className="k">P(perder) MC</span>
+          <span className={`v ${mc.prob_of_loss > 0.5 ? "neg" : "pos"}`}>
+            {fmtPct(mc.prob_of_loss)}
+          </span>
+        </div>
+      </div>
+      <div className="science-line">
+        <span className="k">Monte Carlo ({mc.simulations} sims):</span>{" "}
+        <span className="v small">
+          P5 {fmtMoney(mc.p5)} · P50 {fmtMoney(mc.p50)} · P95 {fmtMoney(mc.p95)}
+        </span>
+      </div>
+      <div className="science-line">
+        <span className="k">Walk-forward:</span>{" "}
+        <span className={`v small ${wfClass}`}>
+          {wf.consistent ? "consistente (lucrou out-of-sample)" : "inconsistente"} — teste{" "}
+          {fmtMoney(wf.test_pnl)} em {wf.test_bars} velas
+        </span>      </div>
+      <div className="science-line">
+        <span className="k">Distribuição P5/P50/P95:</span>{" "}
+        <span className="v small">
+          {fmtMoney(st.p5)} / {fmtMoney(st.p50)} / {fmtMoney(st.p95)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function OrdersPanel({
   client,
   orders,
@@ -468,6 +548,7 @@ export default function App() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [paper, setPaper] = useState<PaperSummary | null>(null);
   const [risk, setRisk] = useState<RiskState | null>(null);
+  const [science, setScience] = useState<BacktestReport | null>(null);
   const [candles, setCandles] = useState<CandlePayload[]>([]);
   const [lastPrice, setLastPrice] = useState<TickPayload | null>(null);
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
@@ -507,6 +588,11 @@ export default function App() {
       setRisk(await client.risk());
     } catch {
       setRisk(null);
+    }
+    try {
+      setScience(await client.backtest("BTCUSDT"));
+    } catch {
+      setScience(null);
     }
   }, [client, token]);
 
@@ -631,6 +717,11 @@ export default function App() {
         <section className="card">
           <h2>Risco</h2>
           <RiskCard risk={risk} />
+        </section>
+
+        <section className="card science-card">
+          <h2>Ciência — laudo estatístico</h2>
+          <ScienceCard report={science} />
         </section>
 
         <section className="card orders-card">

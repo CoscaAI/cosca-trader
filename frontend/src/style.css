@@ -342,6 +342,56 @@ table.compact td {
   text-align: center;
 }
 
+/* ── laudo científico (F5): a ferramenta de probabilidade ───────────────── */
+
+.science {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.science-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.science-verdict .v {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.science-verdict .k {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.science-line {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.science-line .k {
+  color: var(--muted);
+}
+
+.science-line .v.small {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.science .pos {
+  color: #3dd68c;
+}
+
+.science .neg {
+  color: #ff6b6b;
+}
+
 /* ── formulário de ordens ───────────────────────────────────────────────── */
 
 .order-form {
