@@ -4,6 +4,24 @@
 // Vite; o token Bearer é configurado na topbar e persistido no localStorage.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import GridLayout from "react-grid-layout";
+
+// O @types do react-grid-layout está defasado (não reconhece props como cols,
+// tipa onLayoutChange errado). O runtime é estável — usamos o componente sem
+// a tipagem quebrada, mantendo o shape do item declarado localmente.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const Grid = GridLayout as unknown as React.ComponentType<any>;
+
+// Shape de um item do layout (x/y/w/h + mínimos) — o array do painel.
+type GridLayoutItem = {
+  i: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  minW?: number;
+  minH?: number;
+};
 import {
   CandlestickSeries,
   ColorType,
@@ -34,6 +52,36 @@ import type {
 const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
+const LAYOUT_KEY = "cosca_trader_layout";
+
+// Layout default do painel (grid de 12 colunas, linhas de 30px). O Don pode
+// arrastar e redimensionar cada card — o layout fica salvo no navegador.
+const DEFAULT_LAYOUT: GridLayoutItem[] = [
+  { i: "chart", x: 0, y: 0, w: 8, h: 14, minW: 5, minH: 10 },
+  { i: "positions", x: 8, y: 0, w: 4, h: 8, minW: 3, minH: 5 },
+  { i: "balances", x: 8, y: 8, w: 4, h: 7, minW: 3, minH: 4 },
+  { i: "science", x: 0, y: 14, w: 4, h: 12, minW: 3, minH: 8 },
+  { i: "markets", x: 4, y: 14, w: 4, h: 12, minW: 3, minH: 8 },
+  { i: "convergence", x: 8, y: 15, w: 4, h: 9, minW: 3, minH: 6 },
+  { i: "paper", x: 8, y: 24, w: 4, h: 6, minW: 3, minH: 4 },
+  { i: "risk", x: 0, y: 26, w: 4, h: 7, minW: 3, minH: 5 },
+  { i: "orders", x: 4, y: 26, w: 4, h: 10, minW: 3, minH: 6 },
+  { i: "timeline", x: 8, y: 30, w: 4, h: 8, minW: 3, minH: 5 },
+];
+
+// Carrega o layout salvo (ou o default) do localStorage.
+function loadLayout(): GridLayoutItem[] {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as GridLayoutItem[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {
+    /* layout corrompido → default */
+  }
+  return DEFAULT_LAYOUT;
+}
 
 // Timeframes do gráfico (o Don pediu a lista completa). 1s não tem histórico
 // na Binance (mínimo 1m) — fica no seletor para o fluxo ao vivo do SSE.
@@ -686,6 +734,29 @@ export default function App() {
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
   const [timeframe, setTimeframe] = useState<string>("1h");
   const [chartSymbol, setChartSymbol] = useState<string>("BTCUSDT");
+  const [layout, setLayout] = useState<GridLayoutItem[]>(() => loadLayout());
+
+  // Persiste o layout quando o Don reorganiza/redimensiona o painel.
+  // Nota: o @types do react-grid-layout tipa onLayoutChange como (layout) =>
+  // void com "Layout" sendo o ITEM — mas o runtime entrega o ARRAY completo.
+  // Usamos GridLayoutItem[] (o shape real) e alinhamos com as any na prop.
+  const onLayoutChange = useCallback((next: GridLayoutItem[]) => {
+    setLayout(next);
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(next));
+    } catch {
+      /* storage cheio — layout só em memória */
+    }
+  }, []);
+
+  const resetLayout = useCallback(() => {
+    setLayout(DEFAULT_LAYOUT);
+    try {
+      localStorage.removeItem(LAYOUT_KEY);
+    } catch {
+      /* */
+    }
+  }, []);
 
   // Refs de "recurso inativo": após um 503 (convergence sem --shadow, etc.),
   // o painel DESISTE de re-tentar no polling — não martela o servidor.
@@ -861,83 +932,120 @@ export default function App() {
             <span className="dot" />
             {health?.ok ? "core online" : healthErr ?? "conectando…"}
           </div>
+          <button className="btn reset-layout" onClick={resetLayout} title="restaurar layout">
+            ⟲ layout
+          </button>
         </div>
       </header>
 
-      <main className="grid">
-        <section className="card chart-card">
-          <div className="chart-head">
-            <h2>
-              {chartSymbol} — {fmtMoney(lastPrice?.price, 1) ?? "—"}
-            </h2>
-            <div className="chart-controls">
-              <input
-                className="sym-input"
-                value={chartSymbol}
-                onChange={(e) => setChartSymbol(e.target.value.toUpperCase())}
-                placeholder="BTCUSDT"
-                spellCheck={false}
-              />
-              <div className="tf-group">
-                {TF_OPTIONS.map((tf) => (
-                  <button
-                    key={tf}
-                    className={`tf-btn ${timeframe === tf ? "active" : ""}`}
-                    onClick={() => setTimeframe(tf)}
-                  >
-                    {tf}
-                  </button>
-                ))}
+      <main className="grid-main">
+        <Grid
+          className="layout"
+          layout={layout}
+          cols={12}
+          rowHeight={34}
+          width={1200}
+          margin={[14, 14]}
+          containerPadding={[4, 4]}
+          draggableHandle=".card-drag"
+          onLayoutChange={onLayoutChange}
+          isResizable
+          isDraggable
+          compactType="vertical"
+          useCSSTransforms
+        >
+          <div key="chart" className="card chart-card">
+            <div className="card-drag chart-head">
+              <h2>
+                {chartSymbol} — {fmtMoney(lastPrice?.price, 1) ?? "—"}
+              </h2>
+              <div className="chart-controls">
+                <input
+                  className="sym-input"
+                  value={chartSymbol}
+                  onChange={(e) => setChartSymbol(e.target.value.toUpperCase())}
+                  placeholder="BTCUSDT"
+                  spellCheck={false}
+                />
+                <div className="tf-group">
+                  {TF_OPTIONS.map((tf) => (
+                    <button
+                      key={tf}
+                      className={`tf-btn ${timeframe === tf ? "active" : ""}`}
+                      onClick={() => setTimeframe(tf)}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
+            <CandlestickChart candles={candles} lastPrice={lastPrice} timeframe={timeframe} />
           </div>
-          <CandlestickChart candles={candles} lastPrice={lastPrice} timeframe={timeframe} />
-        </section>
 
-        <section className="card">
-          <h2>Posições</h2>
-          <PositionsTable positions={positions} />
-        </section>
+          <div key="positions" className="card">
+            <div className="card-drag">
+              <h2>Posições</h2>
+            </div>
+            <PositionsTable positions={positions} />
+          </div>
 
-        <section className="card">
-          <h2>Saldos</h2>
-          <BalancesTable balances={balances} />
-        </section>
+          <div key="balances" className="card">
+            <div className="card-drag">
+              <h2>Saldos</h2>
+            </div>
+            <BalancesTable balances={balances} />
+          </div>
 
-        <section className="card">
-          <h2>Paper</h2>
-          <PaperCard paper={paper} />
-        </section>
+          <div key="paper" className="card">
+            <div className="card-drag">
+              <h2>Paper</h2>
+            </div>
+            <PaperCard paper={paper} />
+          </div>
 
-        <section className="card">
-          <h2>Risco</h2>
-          <RiskCard risk={risk} />
-        </section>
+          <div key="risk" className="card">
+            <div className="card-drag">
+              <h2>Risco</h2>
+            </div>
+            <RiskCard risk={risk} />
+          </div>
 
-        <section className="card science-card">
-          <h2>Ciência — laudo estatístico</h2>
-          <ScienceCard report={science} />
-        </section>
+          <div key="science" className="card science-card">
+            <div className="card-drag">
+              <h2>Ciência — laudo estatístico</h2>
+            </div>
+            <ScienceCard report={science} />
+          </div>
 
-        <section className="card markets-card">
-          <h2>Mercados globais — radar macro</h2>
-          <MarketsCard markets={markets} />
-        </section>
+          <div key="markets" className="card markets-card">
+            <div className="card-drag">
+              <h2>Mercados globais — radar macro</h2>
+            </div>
+            <MarketsCard markets={markets} />
+          </div>
 
-        <section className="card">
-          <h2>Convergência — laboratório vivo</h2>
-          <ConvergenceCard conv={convergence} />
-        </section>
+          <div key="convergence" className="card">
+            <div className="card-drag">
+              <h2>Convergência — laboratório vivo</h2>
+            </div>
+            <ConvergenceCard conv={convergence} />
+          </div>
 
-        <section className="card orders-card">
-          <h2>Ordens</h2>
-          <OrdersPanel client={client} orders={orders} onSubmitted={refresh} />
-        </section>
+          <div key="orders" className="card orders-card">
+            <div className="card-drag">
+              <h2>Ordens</h2>
+            </div>
+            <OrdersPanel client={client} orders={orders} onSubmitted={refresh} />
+          </div>
 
-        <section className="card timeline-card">
-          <h2>Timeline</h2>
-          <Timeline events={timeline} />
-        </section>
+          <div key="timeline" className="card timeline-card">
+            <div className="card-drag">
+              <h2>Timeline</h2>
+            </div>
+            <Timeline events={timeline} />
+          </div>
+        </Grid>
       </main>
     </div>
   );

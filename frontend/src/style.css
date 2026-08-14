@@ -280,14 +280,71 @@ td.mono {
 
 /* ── grid e cards ──────────────────────────────────────────────────────── */
 
-.grid {
+/* Container do layout arrastável — substitui o .grid estático */
+.grid-main {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px 28px;
-  display: grid;
-  grid-template-columns: repeat(12, 1fr);
-  gap: 16px;
-  align-content: start;
+  overflow-x: hidden;
+  padding: 14px 18px 24px;
+}
+
+.layout {
+  min-height: 600px;
+}
+
+/* O handle de arrastar: o cabeçalho do card vira a "pegada" */
+.card-drag {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  margin-bottom: 10px;
+}
+
+.card-drag:active {
+  cursor: grabbing;
+}
+
+.card-drag h2 {
+  margin-bottom: 0;
+}
+
+/* botão de restaurar layout */
+.btn.reset-layout {
+  padding: 6px 11px;
+  font-size: 11px;
+  color: var(--muted);
+  border-color: var(--border);
+}
+
+.btn.reset-layout:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* placeholder do react-grid-layout durante o drag */
+.react-grid-item.react-grid-placeholder {
+  background: var(--accent-glow);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius);
+  opacity: 0.5;
+}
+
+/* handle de resize (cantos) — visível e premium */
+.react-grid-item > .react-resizable-handle {
+  background-image: none;
+  width: 14px;
+  height: 14px;
+  right: 3px;
+  bottom: 3px;
+  border-right: 2px solid rgba(46, 230, 168, 0.5);
+  border-bottom: 2px solid rgba(46, 230, 168, 0.5);
+  border-bottom-right-radius: 4px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.react-grid-item:hover > .react-resizable-handle {
+  opacity: 1;
 }
 
 .card {
@@ -331,8 +388,9 @@ td.mono {
 }
 
 .chart-card {
-  grid-column: span 8;
   min-height: 380px;
+  display: flex;
+  flex-direction: column;
 }
 
 /* cabeçalho do gráfico: símbolo + seletor de timeframe */
@@ -405,31 +463,25 @@ td.mono {
   box-shadow: 0 0 12px var(--accent-glow);
 }
 
-/* o container do gráfico precisa de ALTURA — autoSize:true com altura 0
-   deixava o gráfico espremido. */
+/* o container do gráfico preenche o card (o grid dá a altura via resize) */
 .chart {
+  flex: 1;
   width: 100%;
-  height: 330px;
+  min-height: 260px;
 }
 
-.science-card {
-  grid-column: span 4;
+/* cards dentro do grid arrastável: preenchem a célula do GridLayout */
+.react-grid-item > .card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.markets-card {
-  grid-column: span 4;
-}
-
-.orders-card {
-  grid-column: span 4;
-}
-
-.timeline-card {
-  grid-column: span 4;
-}
-
-.card:not(.chart-card):not(.science-card):not(.markets-card):not(.orders-card):not(.timeline-card) {
-  grid-column: span 3;
+.react-grid-item > .card > :not(.card-drag) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ── tabelas ───────────────────────────────────────────────────────────── */
@@ -757,13 +809,11 @@ tr:last-child td {
 /* ── responsivo ────────────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
-  .chart-card { grid-column: span 12; }
-  .card:not(.chart-card) { grid-column: span 6 !important; }
+  /* o GridLayout cuida do layout; no mobile reduz o padding */
+  .grid-main { padding: 10px 8px 16px; }
 }
 
 @media (max-width: 700px) {
-  .card:not(.chart-card) { grid-column: span 12 !important; }
-  .grid { padding: 14px 12px 20px; }
   .topbar { flex-direction: column; align-items: stretch; }
   .top-right { justify-content: space-between; }
 }
