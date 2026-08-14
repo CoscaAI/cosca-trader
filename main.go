@@ -137,6 +137,7 @@ func main() {
 			paper.WithInitialBalance(paperBalance()),
 			paper.WithFeePct(paperFeePct()),
 			paper.WithSlippage(paperSlippage()),
+			paper.WithLimitFillFraction(paperLimitFillFraction()),
 		)
 		omsEngine = oms.New(paperBroker, e.Emit, omsOpts()...)
 		omsEngine.SetKillSwitch(os.Getenv("COSCA_TRADER_KILL") == "1")
@@ -321,6 +322,25 @@ func paperSlippage() decimal.Decimal {
 	if err != nil || v.Sign() < 0 {
 		log.Printf("⚠ COSCA_TRADER_PAPER_SLIPPAGE inválido (%q) — desativado", raw)
 		return decimal.Zero
+	}
+	return v
+}
+
+// paperLimitFillFraction lê a fração de fills parciais de ordens limit no modo
+// paper (Fase 3B). Default: 0.5 — uma ordem limit grande preenche metade por
+// avaliação de preço (cada SetPrice reavalia), emitindo TradeExecuted por
+// fatia. 0 = all-or-nothing (comportamento original). Market continua sempre
+// all-or-nothing.
+func paperLimitFillFraction() decimal.Decimal {
+	const def = "0.5"
+	raw := os.Getenv("COSCA_TRADER_PAPER_LIMIT_FILL_FRACTION")
+	if raw == "" {
+		return decimal.RequireFromString(def)
+	}
+	v, err := decimal.NewFromString(raw)
+	if err != nil || v.Sign() < 0 {
+		log.Printf("⚠ COSCA_TRADER_PAPER_LIMIT_FILL_FRACTION inválido (%q) — usando %s", raw, def)
+		return decimal.RequireFromString(def)
 	}
 	return v
 }

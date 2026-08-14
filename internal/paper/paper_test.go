@@ -287,6 +287,184 @@ func TestMarketOrderRequiresPrice(t *testing.T) {
 	}
 }
 
+// ── Fase 3B: fills parciais em ordens limit grandes ─────────────────────────
+
+// TestLimitOrderPartialFills prova o ciclo de fills parciais (Fase 3B): ordem
+// limit grande preenche em fatias conforme o preço evolui (cada SetPrice
+// reavalia), emitindo um TradeExecuted por fatia e avançando o estado da ordem
+// de new → partially_filled → filled. Determinístico (seed de preços injetado).
+func TestLimitOrderPartialFills(t *testing.T) {
+	b := New(WithLimitFillFraction(dd("0.5"))) // 50% por avaliação
+	b.SetPrice("BTCUSDT", dd("100"))
+	rec := &recBroker{}
+	if err := b.StartUserStream(context.Background(), rec.handler()); err != nil {
+		t.Fatalf("StartUserStream: %v", err)
+	}
+
+	// buy limit 2 BTC @ 90 com mercado 100 → fica NEW, trava 180 USDT.
+	ord, err := b.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: dd("2"), Price: dd("90"), ClientOrderID: "cli-pf",
+	})
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	if ord.Status != domain.OrderNew {
+		t.Fatalf("limit fora do preço deveria ficar NEW, status=%s", ord.Status)
+	}
+	usdt := balanceOf(t, b, "USDT")
+	if !usdt.Locked.Equal(dd("180")) || !usdt.Free.Equal(dd("9820")) {
+		t.Fatalf("travamento inicial errado: free=%v locked=%v", usdt.Free, usdt.Locked)
+	}
+
+	// Preço cai para 85 → preenche a 1ª fatia (1 BTC = 50% de 2).
+	b.SetPrice("BTCUSDT", dd("85"))
+	open, _ := b.OpenOrders(context.Background(), "BTCUSDT")
+	if len(open) != 1 || open[0].Status != domain.OrderPartiallyFilled {
+		t.Fatalf("após 1ª fatia a ordem deveria estar partially_filled: %+v", open)
+	}
+	if !open[0].FilledQty.Equal(dd("1")) {
+		t.Errorf("FilledQty = %v, esperava 1", open[0].FilledQty)
+	}
+	if !open[0].AvgFillPrice.Equal(dd("85")) {
+		t.Errorf("AvgFillPrice = %v, esperava 85", open[0].AvgFillPrice)
+	}
+	usdt = balanceOf(t, b, "USDT")
+	// 10000 - 180 (lock) + 90 (unlock 1×90) - 85 (paga 1×85) = 9825; travado 90.
+	if !usdt.Free.Equal(dd("9825")) || !usdt.Locked.Equal(dd("90")) {
+		t.Errorf("pós-1ª fatia: free=%v locked=%v, esperava free 9825 locked 90", usdt.Free, usdt.Locked)
+	}
+
+	// Preço cai para 84 → preenche a 2ª e última fatia → filled.
+	b.SetPrice("BTCUSDT", dd("84"))
+	open, _ = b.OpenOrders(context.Background(), "BTCUSDT")
+	if len(open) != 0 {
+		t.Fatalf("ordem deveria ter completado: %+v", open)
+	}
+	done, _ := b.OrderByClientOrderID(context.Background(), "BTCUSDT", "cli-pf")
+	if done.Status != domain.OrderFilled || !done.FilledQty.Equal(dd("2")) {
+		t.Errorf("pós-fill total: %+v", done)
+	}
+	if !done.AvgFillPrice.Equal(dd("84.5")) {
+		t.Errorf("AvgFillPrice = %v, esperava 84.5 (média 85/84)", done.AvgFillPrice)
+	}
+	usdt = balanceOf(t, b, "USDT")
+	// 9825 + 90 - 84 = 9831; nada travado.
+	if !usdt.Free.Equal(dd("9831")) || !usdt.Locked.IsZero() {
+		t.Errorf("pós-fill total: free=%v locked=%v, esperava free 9831 locked 0", usdt.Free, usdt.Locked)
+	}
+
+	// Rastro: 2 trades (um por fatia) e a sequência partially_filled → filled.
+	_, trades := rec.snapshot()
+	if len(trades) != 2 {
+		t.Fatalf("esperava 2 trades (um por fatia), veio %d", len(trades))
+	}
+	if !trades[0].Quantity.Equal(dd("1")) || !trades[1].Quantity.Equal(dd("1")) {
+		t.Errorf("quantidades das fatias erradas: %+v", trades)
+	}
+	orders, _ := rec.snapshot()
+	if len(orders) != 2 || orders[0].Status != domain.OrderPartiallyFilled || orders[1].Status != domain.OrderFilled {
+		t.Errorf("sequência de estados errada: %+v", orders)
+	}
+}
+
+// TestMarketOrderStaysAllOrNothing garante que ordens market NUNCA preenchem
+// parcialmente, mesmo com fração configurada.
+func TestMarketOrderStaysAllOrNothing(t *testing.T) {
+	b := New(WithLimitFillFraction(dd("0.5")))
+	b.SetPrice("BTCUSDT", dd("100"))
+	rec := &recBroker{}
+	_ = b.StartUserStream(context.Background(), rec.handler())
+
+	ord, err := b.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket,
+		Quantity: dd("2"), ClientOrderID: "cli-mk",
+	})
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	if ord.Status != domain.OrderFilled || !ord.FilledQty.Equal(dd("2")) {
+		t.Fatalf("market deveria preencher tudo de uma vez: %+v", ord)
+	}
+	_, trades := rec.snapshot()
+	if len(trades) != 1 || !trades[0].Quantity.Equal(dd("2")) {
+		t.Errorf("market all-or-nothing quebrado: %d trades %+v", len(trades), trades)
+	}
+}
+
+// TestPartialFillCancelReleasesRemaining verifica que o cancelamento de uma
+// ordem parcialmente preenchida devolve APENAS o remanescente travado.
+func TestPartialFillCancelReleasesRemaining(t *testing.T) {
+	b := New(WithLimitFillFraction(dd("0.5")))
+	b.SetPrice("BTCUSDT", dd("100"))
+	_ = b.StartUserStream(context.Background(), (&recBroker{}).handler())
+
+	if _, err := b.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit,
+		Quantity: dd("2"), Price: dd("90"), ClientOrderID: "cli-pc",
+	}); err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	b.SetPrice("BTCUSDT", dd("85")) // 1ª fatia → parcialmente preenchida
+	open, _ := b.OpenOrders(context.Background(), "BTCUSDT")
+	if len(open) != 1 {
+		t.Fatalf("esperava ordem parcialmente preenchida aberta: %+v", open)
+	}
+	if err := b.CancelOrder(context.Background(), "BTCUSDT", open[0].ID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	usdt := balanceOf(t, b, "USDT")
+	// Após 1ª fatia: free 9825, locked 90. Cancelar devolve os 90 restantes.
+	if !usdt.Free.Equal(dd("9915")) || !usdt.Locked.IsZero() {
+		t.Errorf("cancel parcial: free=%v locked=%v, esperava free 9915 locked 0", usdt.Free, usdt.Locked)
+	}
+}
+
+// TestLimitOrderPartialSell cobre o lado vendedor: fatias de venda entregam a
+// base e recebem quote líquida da taxa a cada avaliação.
+func TestLimitOrderPartialSell(t *testing.T) {
+	b := New(WithLimitFillFraction(dd("0.5")))
+	b.SetPrice("BTCUSDT", dd("100"))
+	_ = b.StartUserStream(context.Background(), (&recBroker{}).handler())
+
+	// Acumula 2 BTC para ter base para vender.
+	if _, err := b.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket,
+		Quantity: dd("2"), ClientOrderID: "cli-acc",
+	}); err != nil {
+		t.Fatalf("acúmulo de base: %v", err)
+	}
+	// sell limit 2 @ 110 com mercado 100 → fica NEW, trava 2 BTC.
+	if _, err := b.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideSell, Type: domain.OrderLimit,
+		Quantity: dd("2"), Price: dd("110"), ClientOrderID: "cli-ps",
+	}); err != nil {
+		t.Fatalf("PlaceOrder sell: %v", err)
+	}
+	btc := balanceOf(t, b, "BTC")
+	if !btc.Locked.Equal(dd("2")) {
+		t.Fatalf("venda deveria travar 2 BTC, veio %+v", btc)
+	}
+
+	b.SetPrice("BTCUSDT", dd("115")) // cruza → 1ª fatia de 1 BTC @ 115
+	open, _ := b.OpenOrders(context.Background(), "BTCUSDT")
+	if len(open) != 1 || open[0].Status != domain.OrderPartiallyFilled {
+		t.Fatalf("esperava partially_filled: %+v", open)
+	}
+	b.SetPrice("BTCUSDT", dd("116")) // 2ª e última fatia
+	open, _ = b.OpenOrders(context.Background(), "BTCUSDT")
+	if len(open) != 0 {
+		t.Fatalf("venda deveria ter completado: %+v", open)
+	}
+	done, _ := b.OrderByClientOrderID(context.Background(), "BTCUSDT", "cli-ps")
+	if done.Status != domain.OrderFilled || !done.FilledQty.Equal(dd("2")) {
+		t.Errorf("venda parcial não completou: %+v", done)
+	}
+	if !done.AvgFillPrice.Equal(dd("115.5")) {
+		t.Errorf("AvgFillPrice = %v, esperava 115.5 (média 115/116)", done.AvgFillPrice)
+	}
+}
+
 func TestStopOrderFillsOnCross(t *testing.T) {
 	b, _ := newTestBroker(t) // BTCUSDT = 100
 	// sell stop a 95: não cruza agora → NEW, trava 0.01 BTC.

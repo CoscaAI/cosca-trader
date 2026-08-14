@@ -5,9 +5,15 @@
 // de corretora real: mesma saga, mesmo rastro, mesmos eventos.
 //
 // Execução simulada:
-//   - market: fill IMEDIATO ao preço corrente (via SetPrice do market data).
+//   - market: fill IMEDIATO ao preço corrente (via SetPrice do market data) —
+//     SEMPRE all-or-nothing.
 //   - limit:  fill condicional — buy só preenche se ask ≤ price (market ≤
 //     limit), sell se bid ≥ price. Senão fica NEW até o preço cruzar.
+//     Com COSCA_TRADER_PAPER_LIMIT_FILL_FRACTION (Fase 3B), ordens limit
+//     GRANDES preenchem em múltiplos fills PARCIAIS conforme o preço evolui:
+//     cada SetPrice reavalia e preenche uma fração da quantidade (emite
+//     TradeExecuted por fatia e OrderPartiallyFilled/OrderFilled conforme o
+//     progresso).
 //   - stop/stop_market: fill quando o preço cruza o stopPrice.
 //   - stop_limit: cruza o stop E respeita o preço limite.
 //
@@ -61,13 +67,17 @@ type Broker struct {
 	feePct      decimal.Decimal // taxa por preenchimento (default 0.001)
 	slippage    decimal.Decimal // slippage aplicado ao preço de execução
 	fillLatency time.Duration   // latência simulada de fill (0 = síncrono)
-
-	balances    map[string]domain.Balance  // ativo → {free, locked}
-	orders      map[string]domain.Order    // por ID da exchange (paper-<n>)
-	clientIndex map[string]string          // clientOrderID → orderID
-	prices      map[string]decimal.Decimal // preço corrente por símbolo
-	avgPrice    map[string]decimal.Decimal // preço médio de custo por ativo
-	trades      []domain.Trade
+	// limitFillFraction (Fase 3B): fração da quantidade original preenchida por
+	// avaliação de preço em ordens limit. 0 = all-or-nothing (comportamento
+	// default da biblioteca); > 0 = fills parciais conforme o preço evolui.
+	limitFillFraction decimal.Decimal
+	balances          map[string]domain.Balance  // ativo → {free, locked}
+	orders            map[string]domain.Order    // por ID da exchange (paper-<n>)
+	clientIndex       map[string]string          // clientOrderID → orderID
+	prices            map[string]decimal.Decimal // preço corrente por símbolo
+	avgPrice          map[string]decimal.Decimal // preço médio de custo por ativo
+	trades            []domain.Trade
+	reserved          map[string]decimal.Decimal // orderID → quote travado de ordem buy (Fase 3B)
 
 	handler     exchange.Handler
 	nextOrderID int64
@@ -94,6 +104,16 @@ func WithSlippage(v decimal.Decimal) Option {
 	return func(b *Broker) { b.slippage = v }
 }
 
+// WithLimitFillFraction habilita fills PARCIAIS de ordens limit (Fase 3B): a
+// cada avaliação de preço (SetPrice), a ordem preenche a fração da quantidade
+// ORIGINAL (ex.: 0.5 = metade por vez) enquanto o preço for favorável — cada
+// fatia gera um TradeExecuted e a ordem avança para partially_filled até
+// completar. Zero (default) = all-or-nothing, comportamento original. Ordens
+// market permanecem SEMPRE all-or-nothing.
+func WithLimitFillFraction(f decimal.Decimal) Option {
+	return func(b *Broker) { b.limitFillFraction = f }
+}
+
 // WithFillLatency simula a latência de execução (default 0 = fill síncrono).
 func WithFillLatency(d time.Duration) Option {
 	return func(b *Broker) { b.fillLatency = d }
@@ -108,6 +128,7 @@ func New(opts ...Option) *Broker {
 		clientIndex: make(map[string]string),
 		prices:      make(map[string]decimal.Decimal),
 		avgPrice:    make(map[string]decimal.Decimal),
+		reserved:    make(map[string]decimal.Decimal),
 	}
 	b.balances["USDT"] = domain.Balance{Asset: "USDT", Free: decimal.NewFromInt(10000)}
 	for _, h := range demoHoldings {
@@ -204,8 +225,14 @@ func (b *Broker) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 		return b.orders[ord.ID], nil
 	}
 
+	// Fluxo lock-first (Fase 3B): trava os fundos ANTES de avaliar o fill. Um
+	// único caminho cobre fill total, fill parcial (ordem limit grande) e
+	// ordem que fica aberta — e o desbloqueio usa exatamente o montante
+	// reservado (dinheiro exato, nunca aproximado).
+	b.lockFunds(ord, base, quote, price)
+
 	if b.shouldFillNow(ord, price) {
-		emitters := b.fillLocked(ord, base, quote, price, false)
+		emitters := b.evaluateFillLocked(ord, base, quote, price)
 		b.mu.Unlock()
 		b.runEmitters(emitters)
 		b.mu.Lock()
@@ -213,7 +240,6 @@ func (b *Broker) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 	}
 
 	// Fica aberta (limit/stop fora do preço corrente).
-	b.lockFunds(ord, base, quote, price)
 	b.orders[ord.ID] = ord
 	return b.orders[ord.ID], nil
 }
@@ -231,7 +257,10 @@ func (b *Broker) CancelOrder(_ context.Context, symbol, orderID string) error {
 		return fmt.Errorf("paper: ordem %q não está aberta", orderID)
 	}
 	base, quote, _ := splitSymbol(ord.Symbol)
+	// Fase 3B: uma ordem parcialmente preenchida devolve apenas o REMANESCENTE
+	// travado (o que já foi preenchido saiu do travamento no próprio fill).
 	b.unlockFunds(ord, base, quote)
+	delete(b.reserved, orderID)
 	ord.Status = domain.OrderCanceled
 	ord.UpdatedAt = time.Now()
 	b.orders[orderID] = ord
@@ -301,7 +330,7 @@ func (b *Broker) SetPrice(symbol string, price decimal.Decimal) {
 			continue
 		}
 		if ok && b.shouldFillNow(ord, price) {
-			emitters = append(emitters, b.fillLocked(ord, base, quote, price, true)...)
+			emitters = append(emitters, b.evaluateFillLocked(ord, base, quote, price)...)
 		}
 	}
 	b.mu.Unlock()
@@ -403,26 +432,57 @@ func (b *Broker) checkFunds(ord domain.Order, base, quote string, price decimal.
 }
 
 // lockFunds trava os fundos de uma ordem aberta (buy trava quote, sell trava
-// base).
+// base). O montante reservado de buy fica registrado em reserved[orderID] para
+// que o desbloqueio (fill parcial / cancelamento) devolva exatamente o que foi
+// travado — dinheiro exato, nunca aproximado por preço corrente.
 func (b *Broker) lockFunds(ord domain.Order, base, quote string, price decimal.Decimal) {
 	if ord.Side == domain.SideBuy {
-		amt := ord.Quantity.Mul(price)
-		if ord.Type == domain.OrderLimit && ord.Price.Sign() > 0 {
-			amt = ord.Quantity.Mul(ord.Price)
-		}
+		amt := b.reservedQuote(ord, price)
 		b.moveFree(quote, amt.Neg(), amt)
+		b.reserved[ord.ID] = amt
 	} else {
 		b.moveFree(base, ord.Quantity.Neg(), ord.Quantity)
 	}
 }
 
-// unlockFunds devolve os fundos travados de uma ordem aberta (cancel/fill).
+// reservedQuote devolve o montante em quote que uma ordem buy reserva:
+// o preço do limit quando houver (pior caso de pagamento), senão o preço
+// corrente (ordens market).
+func (b *Broker) reservedQuote(ord domain.Order, price decimal.Decimal) decimal.Decimal {
+	if ord.Type == domain.OrderLimit && ord.Price.Sign() > 0 {
+		return ord.Quantity.Mul(ord.Price)
+	}
+	return ord.Quantity.Mul(price)
+}
+
+// unlockFunds devolve os fundos travados do REMANESCENTE de uma ordem aberta
+// (cancelamento/fill total). Ver unlockFundsQty.
 func (b *Broker) unlockFunds(ord domain.Order, base, quote string) {
+	b.unlockFundsQty(ord, base, quote, ord.Quantity.Sub(ord.FilledQty))
+}
+
+// unlockFundsQty devolve os fundos travados de uma fração da ordem. Buy
+// desbloqueia o quote proporcional ao reservado registrado (o divisor é o
+// REMANESCENTE, pois o reservado corresponde ao que ainda falta preencher);
+// sell devolve a base. Assim o dinheiro nunca diverge do que foi travado.
+func (b *Broker) unlockFundsQty(ord domain.Order, base, quote string, qty decimal.Decimal) {
+	if qty.Sign() <= 0 {
+		return
+	}
 	if ord.Side == domain.SideBuy {
-		amt := ord.Quantity.Mul(ord.Price)
+		total := b.reserved[ord.ID]
+		if total.Sign() <= 0 {
+			total = ord.Quantity.Mul(ord.Price)
+		}
+		remaining := ord.Quantity.Sub(ord.FilledQty)
+		if remaining.Sign() <= 0 {
+			remaining = ord.Quantity
+		}
+		amt := total.Mul(qty).Div(remaining)
 		b.moveFree(quote, amt, amt.Neg())
+		b.reserved[ord.ID] = total.Sub(amt)
 	} else {
-		b.moveFree(base, ord.Quantity, ord.Quantity.Neg())
+		b.moveFree(base, qty, qty.Neg())
 	}
 }
 
@@ -457,13 +517,49 @@ func (b *Broker) shouldFillNow(ord domain.Order, price decimal.Decimal) bool {
 	return false
 }
 
-// fillLocked executa o fill (chamado sob lock): aplica slippage, movimenta
-// saldos, registra o trade e devolve as notificações para emitir FORA do lock.
+// evaluateFillLocked decide, sob lock, entre preenchimento total e parcial
+// para uma ordem cujo preço cruzou: ordens market/stop preenchem por inteiro
+// (all-or-nothing); ordens limit com fração configurada (Fase 3B) preenchem
+// uma fatia a cada avaliação — o restante segue aberto para os próximos
+// SetPrice. Devolve as notificações para emitir FORA do lock.
+func (b *Broker) evaluateFillLocked(ord domain.Order, base, quote string, price decimal.Decimal) []func() {
+	if ord.Type == domain.OrderLimit && b.limitFillFraction.Sign() > 0 {
+		return b.fillPartialLocked(ord, base, quote, price)
+	}
+	return b.fillLocked(ord, base, quote, price, true)
+}
+
+// fillLocked preenche o remanescente da ordem por inteiro (market, stop e
+// limit sem fração). wasLocked=true indica que os fundos já estavam travados
+// (fluxo lock-first do PlaceOrder) — desbloqueia antes de aplicar.
 func (b *Broker) fillLocked(ord domain.Order, base, quote string, price decimal.Decimal, wasLocked bool) []func() {
 	if wasLocked {
 		b.unlockFunds(ord, base, quote)
 	}
+	return b.applyFillLocked(ord, base, quote, price, ord.Quantity.Sub(ord.FilledQty))
+}
 
+// fillPartialLocked preenche uma FATIA de uma ordem limit grande (Fase 3B,
+// chamado sob lock): fração da quantidade original a cada avaliação de preço,
+// enquanto o preço for favorável. Cada fatia vira um TradeExecuted; o estado
+// da ordem avança para partially_filled até a última fatia (filled).
+func (b *Broker) fillPartialLocked(ord domain.Order, base, quote string, price decimal.Decimal) []func() {
+	remaining := ord.Quantity.Sub(ord.FilledQty)
+	chunk := ord.Quantity.Mul(b.limitFillFraction)
+	if chunk.GreaterThanOrEqual(remaining) {
+		// Última fatia: desbloqueia todo o remanescente e completa.
+		b.unlockFunds(ord, base, quote)
+		return b.applyFillLocked(ord, base, quote, price, remaining)
+	}
+	b.unlockFundsQty(ord, base, quote, chunk)
+	return b.applyFillLocked(ord, base, quote, price, chunk)
+}
+
+// applyFillLocked aplica um preenchimento de fillQty a uma ordem (chamado sob
+// lock): calcula a execução (slippage + cláusula de melhor-preço do limit),
+// movimenta saldos, registra o trade e devolve as notificações para emitir
+// FORA do lock. fillQty ≤ remanescente da ordem.
+func (b *Broker) applyFillLocked(ord domain.Order, base, quote string, price decimal.Decimal, fillQty decimal.Decimal) []func() {
 	exec := price
 	if b.slippage.Sign() > 0 {
 		one := decimal.NewFromInt(1)
@@ -483,25 +579,38 @@ func (b *Broker) fillLocked(ord domain.Order, base, quote string, price decimal.
 		}
 	}
 
-	quoteQty := exec.Mul(ord.Quantity)
-	ord.Status = domain.OrderFilled
-	ord.FilledQty = ord.Quantity
-	ord.AvgFillPrice = exec
+	oldFilled := ord.FilledQty
+	newFilled := oldFilled.Add(fillQty)
+	remaining := ord.Quantity.Sub(newFilled)
+	if oldFilled.Sign() > 0 {
+		// Preço médio ponderado de todos os fills (fatias parciais inclusas).
+		ord.AvgFillPrice = ord.AvgFillPrice.Mul(oldFilled).Add(exec.Mul(fillQty)).Div(newFilled)
+	} else {
+		ord.AvgFillPrice = exec
+	}
+	ord.FilledQty = newFilled
+	if remaining.IsZero() {
+		ord.Status = domain.OrderFilled
+		delete(b.reserved, ord.ID)
+	} else {
+		ord.Status = domain.OrderPartiallyFilled
+	}
 	ord.UpdatedAt = time.Now()
 
+	quoteQty := exec.Mul(fillQty)
 	var fee decimal.Decimal
 	var feeAsset string
 	if ord.Side == domain.SideBuy {
 		held := b.freeOf(base) // quantidade detida ANTES do fill (média ponderada)
-		fee = ord.Quantity.Mul(b.feePct)
+		fee = fillQty.Mul(b.feePct)
 		feeAsset = base
-		b.addFree(base, ord.Quantity.Sub(fee)) // recebe base líquida da taxa
-		b.addFree(quote, quoteQty.Neg())       // paga o notional em quote
-		b.updateAvgPrice(base, exec, ord.Quantity, held)
+		b.addFree(base, fillQty.Sub(fee)) // recebe base líquida da taxa
+		b.addFree(quote, quoteQty.Neg())  // paga o notional em quote
+		b.updateAvgPrice(base, exec, fillQty, held)
 	} else {
 		fee = quoteQty.Mul(b.feePct)
 		feeAsset = quote
-		b.addFree(base, ord.Quantity.Neg()) // entrega a base
+		b.addFree(base, fillQty.Neg())      // entrega a base
 		b.addFree(quote, quoteQty.Sub(fee)) // recebe quote líquida da taxa
 	}
 
@@ -512,7 +621,7 @@ func (b *Broker) fillLocked(ord domain.Order, base, quote string, price decimal.
 		Exchange:  "paper",
 		Side:      ord.Side,
 		Price:     exec,
-		Quantity:  ord.Quantity,
+		Quantity:  fillQty,
 		QuoteQty:  quoteQty,
 		Fee:       fee,
 		FeeAsset:  feeAsset,
@@ -543,7 +652,7 @@ func (b *Broker) fillOrderAsync(id string) {
 		b.mu.Unlock()
 		return
 	}
-	emitters := b.fillLocked(ord, base, quote, price, true)
+	emitters := b.evaluateFillLocked(ord, base, quote, price)
 	b.mu.Unlock()
 	b.runEmitters(emitters)
 }
