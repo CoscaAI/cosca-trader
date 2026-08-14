@@ -3,6 +3,7 @@ package oms
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -333,4 +334,192 @@ func (r *reconcileBroker) Balances(_ context.Context) ([]domain.Balance, error) 
 
 func (r *reconcileBroker) OpenOrders(_ context.Context, _ string) ([]domain.Order, error) {
 	return r.orders, nil
+}
+
+// sagaBroker simula um broker com PlaceOrder instável e OrderRecoverer
+// configurável — usado nos testes da saga de recuperação (P0-2).
+type sagaBroker struct {
+	failPlaceOrder bool
+	found          domain.Order // preenchido = a ordem existe na exchange
+	queries        []string
+}
+
+func (s *sagaBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (domain.Order, error) {
+	if s.failPlaceOrder {
+		return domain.Order{}, errors.New("timeout simulado")
+	}
+	return domain.Order{
+		ID:            "o1",
+		ClientOrderID: req.ClientOrderID,
+		Symbol:        req.Symbol,
+		Side:          req.Side,
+		Type:          req.Type,
+		Quantity:      req.Quantity,
+		Status:        domain.OrderNew,
+	}, nil
+}
+
+func (s *sagaBroker) OrderByClientOrderID(_ context.Context, _ string, clientOrderID string) (domain.Order, error) {
+	s.queries = append(s.queries, clientOrderID)
+	if s.found.ID != "" {
+		return s.found, nil
+	}
+	return domain.Order{}, nil
+}
+
+func (s *sagaBroker) CancelOrder(_ context.Context, _, _ string) error { return nil }
+func (s *sagaBroker) Balances(_ context.Context) ([]domain.Balance, error) {
+	return nil, nil
+}
+func (s *sagaBroker) OpenOrders(_ context.Context, _ string) ([]domain.Order, error) {
+	return nil, nil
+}
+func (s *sagaBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
+
+// recoverBroker é um fakeBroker com OrderRecoverer (para Reconcile por
+// origClientOrderId).
+type recoverBroker struct {
+	fakeBroker
+	found domain.Order
+}
+
+func (r *recoverBroker) OrderByClientOrderID(_ context.Context, _ string, _ string) (domain.Order, error) {
+	if r.found.ID != "" {
+		return r.found, nil
+	}
+	return domain.Order{}, nil
+}
+
+// ambiguousBroker sempre falha, inclusive na consulta de recuperação — o
+// estado vira ambíguo e a chave deve ficar travada.
+type ambiguousBroker struct {
+	placed []string
+}
+
+func (a *ambiguousBroker) PlaceOrder(_ context.Context, req exchange.OrderRequest) (domain.Order, error) {
+	a.placed = append(a.placed, req.ClientOrderID)
+	return domain.Order{}, errors.New("timeout simulado")
+}
+func (a *ambiguousBroker) OrderByClientOrderID(_ context.Context, _, _ string) (domain.Order, error) {
+	return domain.Order{}, errors.New("consulta de recuperação também falhou")
+}
+func (a *ambiguousBroker) CancelOrder(_ context.Context, _, _ string) error { return nil }
+func (a *ambiguousBroker) Balances(_ context.Context) ([]domain.Balance, error) {
+	return nil, nil
+}
+func (a *ambiguousBroker) OpenOrders(_ context.Context, _ string) ([]domain.Order, error) {
+	return nil, nil
+}
+func (a *ambiguousBroker) StartUserStream(_ context.Context, _ exchange.Handler) error { return nil }
+
+// ── P0-2: client_order_id obrigatório + saga de recuperação ────────────────
+
+func TestPlaceOrderAutoGeneratesClientOrderID(t *testing.T) {
+	b := &fakeBroker{}
+	o := New(b, func(event.Event) {})
+	ord, err := o.PlaceOrder(context.Background(), exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("50000"),
+	})
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	if ord.ClientOrderID == "" {
+		t.Error("client_order_id não foi gerado automaticamente")
+	}
+	if len(b.placed) != 1 || b.placed[0].ClientOrderID == "" {
+		t.Error("ordem enviada ao broker sem client_order_id — double trade possível")
+	}
+}
+
+func TestPlaceOrderRejectsAmbiguousDuplicate(t *testing.T) {
+	b := &ambiguousBroker{}
+	o := New(b, func(event.Event) {})
+	req := exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "dup-amb",
+	}
+	if _, err := o.PlaceOrder(context.Background(), req); err == nil {
+		t.Fatal("primeira tentativa deveria falhar (estado ambíguo)")
+	}
+	// estado ambíguo → chave travada → reenvio com o MESMO client_order_id
+	// deve ser rejeitado (409) em vez de gerar double trade.
+	_, err := o.PlaceOrder(context.Background(), req)
+	if !errors.Is(err, ErrDuplicateOrder) {
+		t.Errorf("esperava ErrDuplicateOrder, veio %v", err)
+	}
+	if len(b.placed) != 1 {
+		t.Errorf("double trade: broker recebeu %d envios, esperava 1", len(b.placed))
+	}
+}
+
+func TestPlaceOrderSagaRecoversAcceptedOrder(t *testing.T) {
+	b := &sagaBroker{
+		failPlaceOrder: true,
+		found:          domain.Order{ID: "o-rec", ClientOrderID: "cli-1", Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), Status: domain.OrderNew},
+	}
+	var events []event.Event
+	o := New(b, func(e event.Event) { events = append(events, e) })
+
+	req := exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "cli-1",
+	}
+	ord, err := o.PlaceOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("saga deveria recuperar a ordem aceita: %v", err)
+	}
+	if ord.ID != "o-rec" {
+		t.Errorf("ordem adotada errada: %+v", ord)
+	}
+	if len(events) != 1 || events[0].Type != event.OrderCreated {
+		t.Errorf("ordem adotada deveria emitir OrderCreated, veio %+v", events)
+	}
+	// a ordem recuperada entra no índice → reenvio devolve a mesma (at-most-once)
+	again, _ := o.PlaceOrder(context.Background(), req)
+	if again.ID != "o-rec" {
+		t.Errorf("reenvio após recuperação deveria ser idempotente: %+v", again)
+	}
+}
+
+func TestPlaceOrderConfirmedFailureUnlocksKey(t *testing.T) {
+	b := &sagaBroker{failPlaceOrder: true} // found vazio = confirmado que NÃO existe
+	o := New(b, func(event.Event) {})
+	req := exchange.OrderRequest{
+		Symbol: "BTCUSDT", Side: domain.SideBuy, Type: domain.OrderMarket, Quantity: d("1"), ClientOrderID: "cli-2",
+	}
+	if _, err := o.PlaceOrder(context.Background(), req); err == nil {
+		t.Fatal("falha real deveria ser reportada")
+	}
+	// chave liberada: uma nova tentativa (broker agora ok) é legítima.
+	b.failPlaceOrder = false
+	ord, err := o.PlaceOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reenvio legítimo falhou: %v", err)
+	}
+	if ord.ID != "o1" {
+		t.Errorf("ordem errada após reenvio legítimo: %+v", ord)
+	}
+}
+
+func TestReconcileAdoptsOrphanByClientOrderID(t *testing.T) {
+	b := &recoverBroker{found: domain.Order{
+		ID: "orphan", ClientOrderID: "cli-x", Symbol: "BTCUSDT", Exchange: "binance",
+		Side: domain.SideBuy, Type: domain.OrderLimit, Quantity: d("1"), Price: d("100"), Status: domain.OrderNew,
+	}}
+	o := New(b, func(event.Event) {})
+	// simula uma chave ambígua persistida (tentativa cujo resultado se perdeu)
+	o.mu.Lock()
+	o.pending["cli-x"] = "BTCUSDT"
+	o.mu.Unlock()
+
+	if err := o.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	found := false
+	for _, ord := range o.Orders() {
+		if ord.ID == "orphan" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ordem órfã não foi adotada pelo Reconcile: %+v", o.Orders())
+	}
 }

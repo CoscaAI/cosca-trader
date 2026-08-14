@@ -14,9 +14,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/CoscaAI/cosca-trader/internal/domain"
@@ -27,8 +29,9 @@ import (
 
 // Erros de validação do OMS.
 var (
-	ErrInvalidOrder  = errors.New("ordem inválida")
-	ErrOrderNotFound = errors.New("ordem não encontrada")
+	ErrInvalidOrder   = errors.New("ordem inválida")
+	ErrOrderNotFound  = errors.New("ordem não encontrada")
+	ErrDuplicateOrder = errors.New("client_order_id duplicado")
 )
 
 // OMS é o motor de ordens/posições/saldos.
@@ -39,6 +42,7 @@ type OMS struct {
 	mu          sync.RWMutex
 	orders      map[string]*domain.Order    // por ID da exchange
 	clientOrder map[string]string           // clientOrderID → orderID (idempotência)
+	pending     map[string]string           // clientOrderID → symbol (estado ambíguo/saga P0-2)
 	positions   map[string]*domain.Position // por symbol:exchange
 	balances    map[string]domain.Balance   // por ativo
 	ledger      *ledger.Ledger              // double-entry (fees + PnL)
@@ -53,6 +57,7 @@ func New(broker exchange.Broker, emit func(event.Event)) *OMS {
 		emit:        emit,
 		orders:      make(map[string]*domain.Order),
 		clientOrder: make(map[string]string),
+		pending:     make(map[string]string),
 		positions:   make(map[string]*domain.Position),
 		balances:    make(map[string]domain.Balance),
 		ledger:      ledger.New(),
@@ -61,37 +66,132 @@ func New(broker exchange.Broker, emit func(event.Event)) *OMS {
 }
 
 // PlaceOrder valida, envia à exchange, registra e emite OrderCreated.
-// Idempotente por ClientOrderID: reenviar o mesmo client ID devolve a ordem
-// existente em vez de criar uma nova (3 cliques ≠ 3 ordens).
+//
+// P0-2 (anti double-trade):
+//  1. A chave client_order_id é OBRIGATÓRIA — se o cliente não mandou, geramos
+//     uma UUID. NUNCA se envia ordem à exchange sem a chave (âncora da
+//     idempotência e da saga de recuperação).
+//  2. Reenvio de uma ordem JÁ confirmada devolve a existente (at-most-once:
+//     3 cliques ≠ 3 ordens). Reenvio de uma chave em estado AMBÍGUO (tentativa
+//     anterior cujo resultado é desconhecido) é rejeitado com 409.
+//  3. Se o broker falhar, a saga consulta pelo client_order_id para descobrir
+//     se a ordem foi aceita — adota se foi, reporta falha real se confirmado,
+//     e trava a chave se o estado seguir ambíguo.
 func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domain.Order, error) {
 	if err := validateOrder(req); err != nil {
 		return nil, err
 	}
 
-	o.mu.Lock()
-	if req.ClientOrderID != "" {
-		if id, ok := o.clientOrder[req.ClientOrderID]; ok {
-			ord := o.orders[id]
-			o.mu.Unlock()
-			return ord, nil
-		}
+	if req.ClientOrderID == "" {
+		req.ClientOrderID = uuid.NewString()
 	}
+
+	o.mu.Lock()
+	if id, ok := o.clientOrder[req.ClientOrderID]; ok {
+		ord := o.orders[id]
+		o.mu.Unlock()
+		return ord, nil
+	}
+	if sym, ambiguous := o.pending[req.ClientOrderID]; ambiguous {
+		o.mu.Unlock()
+		return nil, errors.Join(ErrDuplicateOrder, fmt.Errorf("client_order_id %q em recuperação no símbolo %s — resolva o estado antes de reenviar", req.ClientOrderID, sym))
+	}
+	o.pending[req.ClientOrderID] = req.Symbol
 	o.mu.Unlock()
 
 	ord, err := o.broker.PlaceOrder(ctx, req)
 	if err != nil {
-		return nil, err
+		return o.recoverAfterError(ctx, req, err)
 	}
 
-	o.mu.Lock()
-	o.orders[ord.ID] = &ord
-	if ord.ClientOrderID != "" {
-		o.clientOrder[ord.ClientOrderID] = ord.ID
-	}
-	o.mu.Unlock()
-
+	o.registerOrder(req, ord)
 	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
 	return &ord, nil
+}
+
+// recoverAfterError é a saga de recuperação P0-2: após um erro do broker
+// (timeout, conexão perdida), consulta a exchange pelo client_order_id para
+// descobrir se a ordem foi aceita antes de reportar falha.
+func (o *OMS) recoverAfterError(ctx context.Context, req exchange.OrderRequest, origErr error) (*domain.Order, error) {
+	// 1. Broker com OrderRecoverer: consulta direta pelo origClientOrderId.
+	if rec, ok := o.broker.(exchange.OrderRecoverer); ok {
+		ord, rerr := rec.OrderByClientOrderID(ctx, req.Symbol, req.ClientOrderID)
+		if rerr != nil {
+			// Ambíguo: nem o envio nem a consulta confirmaram — trava a chave
+			// para impedir double trade; Reconcile adota a ordem depois.
+			return nil, errors.Join(origErr, fmt.Errorf("estado ambíguo: client_order_id %q travado até reconciliação", req.ClientOrderID))
+		}
+		if ord.ID != "" {
+			o.adoptRecovered(req, ord)
+			return &ord, nil
+		}
+	}
+	// 2. Fallback: varre ordens abertas dos símbolos conhecidos.
+	ord, found, oerr := o.recoverFromOpenOrders(ctx, req)
+	if oerr != nil {
+		return nil, errors.Join(origErr, fmt.Errorf("estado ambíguo: client_order_id %q travado até reconciliação", req.ClientOrderID))
+	}
+	if found {
+		o.adoptRecovered(req, ord)
+		return &ord, nil
+	}
+	// 3. Confirmado que a ordem NÃO existe → falha real; libera a trava.
+	o.mu.Lock()
+	delete(o.pending, req.ClientOrderID)
+	o.mu.Unlock()
+	return nil, origErr
+}
+
+// adoptRecovered registra uma ordem que a saga descobriu na exchange (foi
+// aceita mesmo com a resposta perdida) e emite OrderCreated — o cliente recebe
+// a ordem criada em vez de um erro falso.
+func (o *OMS) adoptRecovered(req exchange.OrderRequest, ord domain.Order) {
+	o.mu.Lock()
+	if _, known := o.orders[ord.ID]; !known {
+		o.orders[ord.ID] = &ord
+	}
+	clientID := ord.ClientOrderID
+	if clientID == "" {
+		clientID = req.ClientOrderID
+	}
+	if clientID != "" {
+		o.clientOrder[clientID] = ord.ID
+	}
+	delete(o.pending, req.ClientOrderID)
+	o.mu.Unlock()
+	o.emitEvent(event.Event{Type: event.OrderCreated, Source: "oms", Payload: ord})
+}
+
+// recoverFromOpenOrders procura a ordem em ordens abertas dos símbolos
+// conhecidos (fallback sem OrderRecoverer). Erro = consulta ambígua.
+func (o *OMS) recoverFromOpenOrders(ctx context.Context, req exchange.OrderRequest) (domain.Order, bool, error) {
+	for _, s := range o.symbols() {
+		orders, err := o.broker.OpenOrders(ctx, s)
+		if err != nil {
+			return domain.Order{}, false, err
+		}
+		for _, ord := range orders {
+			if ord.ClientOrderID == req.ClientOrderID {
+				return ord, true, nil
+			}
+		}
+	}
+	return domain.Order{}, false, nil
+}
+
+// registerOrder grava a ordem confirmada nos índices do OMS (idempotência).
+func (o *OMS) registerOrder(req exchange.OrderRequest, ord domain.Order) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.orders[ord.ID] = &ord
+	clientID := ord.ClientOrderID
+	if clientID == "" {
+		clientID = req.ClientOrderID
+	}
+	if clientID != "" {
+		o.clientOrder[clientID] = ord.ID
+	}
+	delete(o.pending, req.ClientOrderID)
 }
 
 // CancelOrder cancela uma ordem ativa e emite OrderCanceled.
@@ -288,6 +388,11 @@ func (o *OMS) Replay(events []event.Event) {
 
 // Reconcile sincroniza o estado com a exchange via REST (Balances + OpenOrders
 // dos símbolos conhecidos). Usado no startup e na reconexão do user stream.
+//
+// P0-2: além dos símbolos, consulta as ordens pelo origClientOrderId PERSISTIDO
+// no journal (e pelas chaves ainda ambíguas) e adota qualquer ordem que exista
+// na exchange mas não no rastro local — cobre o crash entre broker.PlaceOrder e
+// a emissão de OrderCreated, e fills cujo estado terminal foi perdido.
 func (o *OMS) Reconcile(ctx context.Context) error {
 	if o.broker == nil {
 		return nil
@@ -308,7 +413,47 @@ func (o *OMS) Reconcile(ctx context.Context) error {
 			o.ApplyOrderUpdate(ord)
 		}
 	}
+
+	// Saga pós-crash: adota ordens órfãs consultando por origClientOrderId.
+	rec, ok := o.broker.(exchange.OrderRecoverer)
+	if !ok {
+		return nil
+	}
+	for clientID, sym := range o.clientOrderIDs() {
+		if clientID == "" {
+			continue
+		}
+		ord, err := rec.OrderByClientOrderID(ctx, sym, clientID)
+		if err != nil || ord.ID == "" {
+			continue
+		}
+		o.mu.RLock()
+		_, known := o.orders[ord.ID]
+		o.mu.RUnlock()
+		if known {
+			continue
+		}
+		o.ApplyOrderUpdate(ord) // adota a ordem órfã
+	}
 	return nil
+}
+
+// clientOrderIDs devolve client_order_id → symbol das chaves conhecidas no
+// journal e das ainda ambíguas (pending) — fonte da reconciliação por
+// origClientOrderId.
+func (o *OMS) clientOrderIDs() map[string]string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	out := make(map[string]string, len(o.clientOrder)+len(o.pending))
+	for clientID, orderID := range o.clientOrder {
+		if ord, ok := o.orders[orderID]; ok {
+			out[clientID] = ord.Symbol
+		}
+	}
+	for clientID, sym := range o.pending {
+		out[clientID] = sym
+	}
+	return out
 }
 
 // symbols devolve os símbolos distintos que o OMS conhece.

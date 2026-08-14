@@ -88,6 +88,20 @@ func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 	return out.toDomain()
 }
 
+// OrderByClientOrderID consulta uma ordem pelo origClientOrderId (GET
+// /api/v3/order). Devolve a ordem se ela existir; ID vazio se não existir.
+// Usada na saga de recuperação do OMS pós-erro ambíguo.
+func (c *Client) OrderByClientOrderID(ctx context.Context, symbol, clientOrderID string) (domain.Order, error) {
+	params := url.Values{}
+	params.Set("symbol", symbol)
+	params.Set("origClientOrderId", clientOrderID)
+	var out restOrder
+	if err := c.signedRequest(ctx, httpMethodGet, "/api/v3/order", params, &out); err != nil {
+		return domain.Order{}, err
+	}
+	return out.toDomain()
+}
+
 // CancelOrder cancela uma ordem (DELETE /api/v3/order).
 func (c *Client) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	params := url.Values{}

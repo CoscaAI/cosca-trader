@@ -53,15 +53,17 @@ type Exchange interface {
 }
 
 // OrderRequest é a ordem a ser enviada à exchange (payload de execução).
+// As tags JSON alimentam o endpoint POST /orders (a API aceita client_order_id
+// para idempotência — a chave nunca é opcional no caminho de liquidação).
 type OrderRequest struct {
-	Symbol        string
-	Side          domain.Side
-	Type          domain.OrderType
-	Quantity      decimal.Decimal
-	Price         decimal.Decimal
-	StopPrice     decimal.Decimal
-	TimeInForce   domain.TimeInForce
-	ClientOrderID string
+	Symbol        string          `json:"symbol"`
+	Side          domain.Side     `json:"side"`
+	Type          domain.OrderType `json:"type"`
+	Quantity      decimal.Decimal `json:"quantity"`
+	Price         decimal.Decimal `json:"price"`
+	StopPrice     decimal.Decimal `json:"stop_price"`
+	TimeInForce   domain.TimeInForce `json:"time_in_force,omitempty"`
+	ClientOrderID string          `json:"client_order_id"`
 }
 
 // Broker é a interface de execução autenticada (ordens + conta). Separada da
@@ -79,4 +81,16 @@ type Broker interface {
 	// StartUserStream abre o stream de eventos da conta (ordens, fills, saldo)
 	// até o contexto ser cancelado.
 	StartUserStream(ctx context.Context, h Handler) error
+}
+
+// OrderRecoverer é uma interface OPCIONAL de brokers que conseguem consultar
+// uma ordem pelo clientOrderID (origClientOrderId na Binance). Usada pela saga
+// de recuperação do OMS: quando PlaceOrder falha de forma ambígua (timeout,
+// conexão perdida), o OMS pergunta ao broker se a ordem foi aceita — evitando
+// reenvio (double trade) ou perda silenciosa.
+type OrderRecoverer interface {
+	// OrderByClientOrderID devolve a ordem do clientOrderID no símbolo (a API
+	// da Binance exige o símbolo), ou uma ordem com ID vazio se ela não existir.
+	// Erro = estado ambíguo (não confirmado).
+	OrderByClientOrderID(ctx context.Context, symbol, clientOrderID string) (domain.Order, error)
 }
