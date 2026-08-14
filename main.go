@@ -31,6 +31,7 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/exchange/binance"
 	"github.com/CoscaAI/cosca-trader/internal/market"
+	"github.com/CoscaAI/cosca-trader/internal/marketindex"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
 	"github.com/CoscaAI/cosca-trader/internal/risk"
@@ -56,6 +57,7 @@ func main() {
 	scanFlag := flag.Bool("scan", false, "Fase 5: SCANNER — avalia TODAS as estratégias com dados reais e ranqueia por score científico")
 	scanSymbols := flag.String("scan-symbols", "BTCUSDT", "símbolos do scanner separados por vírgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)")
 	scanIntervals := flag.String("scan-intervals", "1h", "intervalos do scanner separados por vírgula (ex: 1h,4h,1d)")
+	marketsFlag := flag.Bool("markets", false, "proteção macro: monitora os mercados GLOBAIS (S&P 500, NASDAQ, VIX, ouro, dólar) e mostra o regime risk-on/risk-off")
 	shadowFlag := flag.Bool("shadow", false, "Fase 5: MODO LABORATÓRIO VIVO — observa o mercado REAL (sem chave, sem dinheiro), registra previsões da estratégia, mede CONVERGÊNCIA com a realidade e reajusta sozinho quando o regime muda")
 	shadowStrategy := flag.String("shadow-strategy", "ema-cross", "estratégia no modo shadow")
 	shadowDemo := flag.Bool("shadow-demo", false, "modo shadow com candles sintéticos ACELERADOS (velas de 5s) — para o Don VER o laboratório vivo funcionando em minutos, sem esperar o mercado real")
@@ -103,6 +105,20 @@ func main() {
 	// shadowMonitor é preenchido pelo modo --shadow e exposto em /convergence.
 	var shadowMonitor *strategy.ConvergenceMonitor
 
+	// Radar macro (missão do Don): monitora os mercados GLOBAIS (S&P, NASDAQ,
+	// VIX, ouro, dólar) e expõe o regime para o risk manager ajustar a
+	// exposição em risk-off. Cache interno de 5min — sem custo por ordem.
+	macroRadar := marketindex.New()
+	macroRegime := func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		r, err := macroRadar.Regime(ctx)
+		if err != nil {
+			return "desconhecido"
+		}
+		return r
+	}
+
 	// Rastreamento total: a partir daqui, TODO evento passa pelo Emit.
 	e.Emit(event.Event{
 		Type:     event.SystemStarted,
@@ -132,6 +148,13 @@ func main() {
 	// o portão da casa. Responde "qual é a melhor estratégia AGORA?".
 	if *scanFlag {
 		runScanMulti(*scanSymbols, *scanIntervals, *fetchBars)
+		return
+	}
+
+	// Proteção macro (missão do Don): monitorar os mercados GLOBAIS para saber
+	// o que acontece lá fora — S&P, NASDAQ, VIX, ouro, dólar.
+	if *marketsFlag {
+		runMarkets()
 		return
 	}
 
@@ -237,6 +260,7 @@ func main() {
 				s := paperBroker.Summary()
 				return s.Equity
 			},
+			MacroRegime: macroRegime,
 			Emit: func(evType, sev string, payload any) {
 				if err := e.Emit(event.Event{Type: event.Type(evType), Source: "risk", Severity: sev, Payload: payload}); err != nil {
 					log.Printf("⚠ risk: %v", err)
@@ -301,6 +325,7 @@ func main() {
 				}
 				return eq
 			},
+			MacroRegime: macroRegime,
 			Emit: func(evType, sev string, payload any) {
 				if err := e.Emit(event.Event{Type: event.Type(evType), Source: "risk", Severity: sev, Payload: payload}); err != nil {
 					log.Printf("⚠ risk: %v", err)
@@ -652,6 +677,26 @@ func runShadow(symbol, interval, strategyName, port string, demo bool, e *engine
 	if err := md.Start(ctx); err != nil {
 		log.Printf("shadow: market data encerrado: %v", err)
 	}
+}
+
+// runMarkets monitora os mercados GLOBAIS (proteção macro): imprime o
+// snapshot corrente com o regime risk-on/risk-off e, em loop, avisa quando o
+// regime muda. É o "radar externo" do Don.
+func runMarkets() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	c := marketindex.New()
+
+	snap, err := c.Fetch(ctx)
+	if err != nil {
+		log.Printf("⚠ mercados globais indisponíveis: %v", err)
+		return
+	}
+	log.Printf("═══ MERCADOS GLOBAIS (%s) ═══", snap.FetchedAt.Format("15:04:05"))
+	for _, q := range snap.Quotes {
+		log.Printf("  %-18s %10.2f  5d:%+5.2f%%  10d:%+5.2f%%", q.Name, q.Price, q.Change5d, q.Change10d)
+	}
+	log.Printf("REGIME: %s — %s", snap.Regime, snap.Signal)
 }
 
 // runScan puxa dados REAIS da Binance (API pública, sem chave) e roda o

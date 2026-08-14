@@ -66,6 +66,10 @@ type Config struct {
 	EquityProvider func() decimal.Decimal
 	// Emit envia eventos de risco (RiskBreach/RiskWarning) ao rastro.
 	Emit func(evType string, severity string, payload any)
+	// MacroRegime devolve o regime global corrente: "risk-on", "risk-off",
+	// "cautela" ou "desconhecido" (proteção macro — a missão do Don de
+	// monitorar S&P/NASDAQ/ouro). nil = sem monitor macro.
+	MacroRegime func() string
 }
 
 // Manager é o gerenciador de risco thread-safe.
@@ -130,17 +134,34 @@ func (m *Manager) Check(notional decimal.Decimal, positions []domain.Position, o
 		return errors.Join(ErrEquityUnavailable, errors.New("equity <= 0"))
 	}
 
+	// Proteção MACRO (a missão do Don): em risk-off global, a exposição
+	// permitida cai pela metade — o mundo está em aversão ao risco, não se
+	// entra pesado no cripto.
+	expoLimit := m.cfg.MaxExposurePct
+	totalLimit := m.cfg.MaxTotalExposurePct
+	regime := ""
+	if m.cfg.MacroRegime != nil {
+		regime = m.cfg.MacroRegime()
+	}
+	if regime == "risk-off" {
+		expoLimit = expoLimit.Div(decimal.NewFromInt(2))
+		totalLimit = totalLimit.Div(decimal.NewFromInt(2))
+	}
+
 	// Exposição pós-ordem por símbolo.
-	if m.cfg.MaxExposurePct.IsPositive() && notional.IsPositive() {
+	if expoLimit.IsPositive() && notional.IsPositive() {
 		symExpo := notional.Div(equity)
-		if symExpo.GreaterThan(m.cfg.MaxExposurePct) {
-			return errors.Join(ErrExposureExceeded,
-				errors.New("exposição "+symExpo.String()+" excede "+m.cfg.MaxExposurePct.String()+" do equity"))
+		if symExpo.GreaterThan(expoLimit) {
+			msg := "exposição " + symExpo.String() + " excede " + expoLimit.String() + " do equity"
+			if regime == "risk-off" {
+				msg = "RISK-OFF global: " + msg + " (limite reduzido pela metade — proteção macro)"
+			}
+			return errors.Join(ErrExposureExceeded, errors.New(msg))
 		}
 	}
 
 	// Exposição total da carteira (pós-ordem).
-	if m.cfg.MaxTotalExposurePct.IsPositive() {
+	if totalLimit.IsPositive() {
 		total := decimal.Zero
 		for _, p := range positions {
 			if !p.IsOpen() {
@@ -149,7 +170,7 @@ func (m *Manager) Check(notional decimal.Decimal, positions []domain.Position, o
 			total = total.Add(p.AvgEntryPrice.Mul(p.Quantity))
 		}
 		total = total.Add(notional)
-		if total.Div(equity).GreaterThan(m.cfg.MaxTotalExposurePct) {
+		if total.Div(equity).GreaterThan(totalLimit) {
 			return ErrTotalExposureLimit
 		}
 	}

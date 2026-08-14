@@ -502,3 +502,38 @@ Ideal para varrer ativos × parâmetros × timeframes em escala.
 A caçada multi-símbolo encontrou **bb-reversion em ETHUSDT 1h** (stop 0.6×ATR)
 aprovada com p=0.016, PF=2.82, P(perder)=0%, walk-forward consistente e edge
 +6.8% vs buy-and-hold. Candidata à chave da testnet.
+
+## Proteção macro — monitor dos mercados GLOBAIS (S&P, NASDAQ, VIX, ouro, dólar)
+
+O Don pediu: *"precisamos nos proteger de mercado estrangeiro... monitorar
+junto pra saber o que acontece"*. O cripto não vive numa bolha — quando o S&P
+cai forte, o BTC segue (risk-off). O `internal/marketindex` monitora os
+mercados globais via Yahoo Finance (API pública, SEM chave):
+
+```bash
+# Ver o radar global agora:
+go run . --markets
+```
+
+```
+═══ MERCADOS GLOBAIS ═══
+  S&P 500          7782.42  5d:+0.38%  10d:+2.39%
+  NASDAQ           26692.07 5d:+0.33%  10d:+3.00%
+  VIX (medo)         14.42  5d:-6.73%  10d:-9.08%
+  Ouro             4432.70  5d:+1.63%  10d:+8.24%
+  Dólar (DXY)        99.65  5d:-0.16%  10d:-0.24%
+REGIME: risk-on — ✅ RISK-ON: mercados globais favoráveis
+```
+
+### Como protege
+
+1. **Regime macro** calculado: risk-on / cautela / risk-off (S&P 5d, VIX > 25,
+   ouro 5d, dólar 5d).
+2. **O risk manager consulta o regime a cada ordem**: em **risk-off**, o limite
+   de exposição cai pela METADE automaticamente — o mundo está em aversão ao
+   risco, não se entra pesado no cripto.
+3. Cache de 5min (sem custo por ordem); falha do radar = regime "desconhecido"
+   (usa o limite normal — fail-safe conservador).
+
+A proteção macro é automática: o Don vê o radar e o sistema se ajusta sozinho
+quando o mundo vira contra o risco.
