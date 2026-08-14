@@ -27,7 +27,7 @@ CORE (Go) — headless, event-driven
 - **F2** — OMS: ordens, fills, posições, saldos, book de ofertas. ✅
 - **F3** — Gráficos + indicadores (plugins).
 - **F4** — Risco (sizing, stop/target, drawdown) + opções.
-- **F5** — Estratégias + backtest + paper trading.
+- **F5** — Estratégias + backtest + paper trading. (o **modo paper** já existe desde a Fase 2B)
 - **F6** — Assistente IA cognitiva.
 - **F7** — B3 (MetaTrader5/API de corretora) + Coinbase/CoinEx + empacotamento enterprise.
 
@@ -43,6 +43,7 @@ internal/
   exchange/ Abstração de corretoras (Provider Engine) + adapter Binance
   market/   Market Data Engine (exchange → eventos de mercado)
   oms/      Order Management System (ordens, posições, saldos, PnL)
+  paper/    Paper trading engine (broker simulado + candles sintéticos)
 frontend/   React + Vite + TypeScript (desktop Wails)
 ```
 
@@ -81,6 +82,79 @@ cd frontend && npm install && npm run dev
 wails build -tags webkit2_41
 ```
 
+## Modo paper (Fase 2B — operar junto com o kernel, sem corretora)
+
+O **paper trading engine** emula uma corretora em memória (fills simulados,
+saldos virtuais, fees) — o kernel inteiro (OMS, event bus, HTTP, journal)
+roda do mesmo jeito, mas o dinheiro é de mentira. Ideal para validar
+estratégia, UX e os controles antes de testnet/live.
+
+```bash
+# PAPER com candles SINTÉTICOS (sem internet, sem chaves):
+go run . --paper
+
+# PAPER com market data REAL da Binance (os fills usam o preço ao vivo):
+go run . --paper --binance --symbol BTCUSDT --interval 1m
+```
+
+`--paper` é **exclusivo** com `--live`/`--testnet` (conflito = erro). No modo
+paper não há exigência de chaves Binance.
+
+O que acontece ao operar:
+
+1. `POST /orders` → o OMS roda a saga normal (intent durável → broker →
+   `OrderCreated`), mas quem executa é o **paper broker**.
+2. **market** preenche na hora no preço corrente; **limit** só preenche se o
+   preço cruzar o limite; **stop** dispara no cruzamento do `stop_price`.
+   Ordens não preenchidas ficam `NEW` com fundos travados (como em corretora
+   real) e preenchem quando o preço se move.
+3. Cada fill gera os mesmos eventos (`TradeExecuted`, `PositionOpened/Closed`,
+   `BalanceUpdated`) e o PnL é calculado pelo OMS com `decimal` exato.
+4. `GET /paper` (autenticado) devolve o resumo: capital inicial, capital
+   atual, PnL total, ordens abertas e trades simulados.
+
+### Env vars do modo paper
+
+| Variável | Default | Efeito |
+|---|---|---|
+| `COSCA_TRADER_PAPER_BALANCE` | `10000` | Caixa inicial em USDT (+ BTC/ETH/BNB de demonstração). |
+| `COSCA_TRADER_PAPER_FEE_PCT` | `0.001` | Taxa por preenchimento (0.1%), debitada no ativo recebido. |
+| `COSCA_TRADER_PAPER_SLIPPAGE` | `0` | Deslizamento de preço de execução (ex.: `0.01` = 1%). |
+| `COSCA_TRADER_PAPER_SEED` | aleatório | Semente do feed de candles sintéticos — definir = demo reproduzível. |
+
+## Rastreamento de intent (Fase 2A — nunca mais ordem órfã)
+
+Antes da Fase 2A, a ordem só virava registro no journal quando `OrderCreated`
+era emitido DEPOIS do sucesso do broker. Se o processo caísse entre o broker
+aceitar e o emit, a ordem existia na Binance mas não no rastro — ficava órfã
+até o `Reconcile` achá-la (e ele só varria símbolos conhecidos).
+
+A Fase 2A fecha essa janela com um **order intent**: registro durável do
+`client_order_id` + request, persistido **ANTES** de tocar o broker.
+
+- **Fase 1 (pré-broker):** o intent é gravado como `pending`. Se a
+  persistência falhar, a ordem **nunca** é enviada (falha limpa — sem ordem
+  fantasma).
+- **Fase 2 (broker):** envio à exchange.
+- **Fase 3 (pós-broker):** sucesso → `OrderCreated` + intent `submitted`;
+  erro → saga consulta a exchange por `origClientOrderId` — adota se existir
+  (`submitted`), marca `failed` se confirmadamente não existir.
+
+O **`Reconcile`** (startup/reconexão) consulta **todos** os intents
+`pending`/`submitted` e pergunta à exchange por `origClientOrderId`: se a
+ordem existir, adota (registra + emite `OrderCreated`); se não, marca
+`failed`. Mesmo sem símbolo conhecido, a ordem do crash window é recuperada.
+
+Intents que chegam a estado terminal (`filled`/`canceled`/`expired`) são
+marcados `done` e deixam de ser varridos.
+
+**Fail-parado (dinheiro):** eventos de dinheiro (`OrderCreated`,
+`OrderSubmitted`, `TradeExecuted`, `PositionOpened/Closed`, `BalanceUpdated`)
+que não persistirem fazem o caminho síncrono **retornar erro** em vez de
+fingir sucesso — o `PlaceOrder` devolve erro (a ordem existe na exchange e o
+intent `pending` garante a recuperação). Eventos de market data
+(tick/candle) continuam tolerantes a falha de persistência.
+
 ## Segurança e operação (Fase 1 — blindagem)
 
 O core opera **fail-closed**: nada sensível (ordens, posições, saldos, timeline,
@@ -106,8 +180,9 @@ real exige decisão consciente do operador.
 
 1. **Testnet** — `BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --binance`
    (sandbox, zero risco). Use chaves geradas no painel de testnet.
-2. **Paper** — rode o core em observação (`go run .`) com o frontend; valide o
-   journal, o ledger e os controles de risco.
+2. **Paper** — `go run . --paper` (ou com `--binance` para preços reais);
+   valide estratégia, journal, ledger e controles de risco com dinheiro
+   fictício, no núcleo real.
 3. **Live** — `COSCA_TRADER_TOKEN=... BINANCE_API_KEY=... BINANCE_API_SECRET=... go run . --live`
    com ordens pequenas e `COSCA_TRADER_MAX_ORDER_USDT` conservador. Chaves com
    permissão mínima (sem retirada) na Binance.
@@ -117,7 +192,8 @@ real exige decisão consciente do operador.
 - **Anti double-trade:** toda ordem carrega `client_order_id` (gerado se
   ausente) e a chave é única por requisição. Erro ambíguo do broker trava a
   chave até a reconciliação — o `Reconcile` adota ordens órfãs pelo
-  `origClientOrderId` persistido no journal.
+  `origClientOrderId` persistido no journal **e nos intents duráveis**
+  (ver "Rastreamento de intent").
 - **Metadados de instrumento (P1-1):** o core carrega o `/exchangeInfo` no
   startup (revalidado a cada 24h) e valida/arredonda a ordem contra
   `step_size`, `tick_size`, `min_qty` e `min_notional` **antes** de assinar —
