@@ -53,26 +53,30 @@ const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
 const LAYOUT_KEY = "cosca_trader_layout";
+const LAYOUT_VERSION = "v2"; // invalida layouts antigos (rowHeight mudou 34→22)
 
-// Layout default do painel (grid de 12 colunas, linhas de 30px). O Don pode
-// arrastar e redimensionar cada card — o layout fica salvo no navegador.
+// Layout default do painel (grid de 12 colunas, linhas de 22px — mais
+// compacto e com resize proporcional). O Don pode arrastar e redimensionar
+// cada card — o layout fica salvo no navegador.
 const DEFAULT_LAYOUT: GridLayoutItem[] = [
-  { i: "chart", x: 0, y: 0, w: 8, h: 14, minW: 5, minH: 10 },
-  { i: "positions", x: 8, y: 0, w: 4, h: 8, minW: 3, minH: 5 },
-  { i: "balances", x: 8, y: 8, w: 4, h: 7, minW: 3, minH: 4 },
-  { i: "science", x: 0, y: 14, w: 4, h: 12, minW: 3, minH: 8 },
-  { i: "markets", x: 4, y: 14, w: 4, h: 12, minW: 3, minH: 8 },
-  { i: "convergence", x: 8, y: 15, w: 4, h: 9, minW: 3, minH: 6 },
-  { i: "paper", x: 8, y: 24, w: 4, h: 6, minW: 3, minH: 4 },
-  { i: "risk", x: 0, y: 26, w: 4, h: 7, minW: 3, minH: 5 },
-  { i: "orders", x: 4, y: 26, w: 4, h: 10, minW: 3, minH: 6 },
-  { i: "timeline", x: 8, y: 30, w: 4, h: 8, minW: 3, minH: 5 },
+  { i: "chart", x: 0, y: 0, w: 8, h: 10, minW: 5, minH: 6 },
+  { i: "positions", x: 8, y: 0, w: 4, h: 6, minW: 3, minH: 4 },
+  { i: "balances", x: 8, y: 6, w: 4, h: 5, minW: 3, minH: 3 },
+  { i: "science", x: 0, y: 10, w: 4, h: 9, minW: 3, minH: 6 },
+  { i: "markets", x: 4, y: 10, w: 4, h: 9, minW: 3, minH: 6 },
+  { i: "convergence", x: 8, y: 11, w: 4, h: 6, minW: 3, minH: 4 },
+  { i: "paper", x: 8, y: 17, w: 4, h: 4, minW: 3, minH: 3 },
+  { i: "risk", x: 0, y: 19, w: 4, h: 5, minW: 3, minH: 3 },
+  { i: "orders", x: 4, y: 19, w: 4, h: 8, minW: 3, minH: 5 },
+  { i: "timeline", x: 8, y: 21, w: 4, h: 6, minW: 3, minH: 4 },
 ];
 
-// Carrega o layout salvo (ou o default) do localStorage.
+// Carrega o layout salvo (ou o default) do localStorage. Layouts de versão
+// antiga (rowHeight 34, h enormes) são descartados — o gráfico estourava a
+// tela.
 function loadLayout(): GridLayoutItem[] {
   try {
-    const raw = localStorage.getItem(LAYOUT_KEY);
+    const raw = localStorage.getItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`);
     if (raw) {
       const parsed = JSON.parse(raw) as GridLayoutItem[];
       if (Array.isArray(parsed) && parsed.length > 0) return parsed;
@@ -743,7 +747,7 @@ export default function App() {
   const onLayoutChange = useCallback((next: GridLayoutItem[]) => {
     setLayout(next);
     try {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(next));
+      localStorage.setItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`, JSON.stringify(next));
     } catch {
       /* storage cheio — layout só em memória */
     }
@@ -752,7 +756,7 @@ export default function App() {
   const resetLayout = useCallback(() => {
     setLayout(DEFAULT_LAYOUT);
     try {
-      localStorage.removeItem(LAYOUT_KEY);
+      localStorage.removeItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`);
     } catch {
       /* */
     }
@@ -943,8 +947,8 @@ export default function App() {
           className="layout"
           layout={layout}
           cols={12}
-          rowHeight={34}
-          margin={[14, 14]}
+          rowHeight={22}
+          margin={[12, 12]}
           containerPadding={[4, 4]}
           draggableHandle=".card-drag"
           onDragStop={onLayoutChange}

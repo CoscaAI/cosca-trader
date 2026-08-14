@@ -298,6 +298,24 @@ td.mono {
   user-select: none;
   -webkit-user-select: none;
   margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+/* ícone de arraste (⠿) no cabeçalho — deixa claro onde pegar */
+.card-drag::before {
+  content: "⠿";
+  color: var(--muted);
+  font-size: 13px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+/* o cabeçalho do gráfico não usa o ícone (já tem símbolo + controles) */
+.card-drag.chart-head::before {
+  content: none;
 }
 
 .card-drag:active {
@@ -463,11 +481,14 @@ td.mono {
   box-shadow: 0 0 12px var(--accent-glow);
 }
 
-/* o container do gráfico preenche o card (o grid dá a altura via resize) */
+/* o container do gráfico preenche o card — altura vem do GridLayout (rowHeight
+   × h), o lightweight-charts autoSize respeita o pai. NUNCA flex:1 infinito
+   (estourava a tela: o gráfico crescia sem limite). */
 .chart {
-  flex: 1;
   width: 100%;
-  min-height: 260px;
+  height: 100%;
+  min-height: 180px;
+  max-height: 100%;
 }
 
 /* cards dentro do grid arrastável: preenchem a célula do GridLayout */
@@ -482,6 +503,16 @@ td.mono {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* o card do gráfico: o body (chart) ocupa o espaço restante sem estourar */
+.react-grid-item > .chart-card {
+  min-height: 0;
+}
+
+.react-grid-item > .chart-card > .chart {
+  flex: 1 1 0%;
+  min-height: 0;
 }
 
 /* ── tabelas ───────────────────────────────────────────────────────────── */
