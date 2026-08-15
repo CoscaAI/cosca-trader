@@ -412,7 +412,6 @@ td.mono {
 }
 
 .chart-card {
-  min-height: 380px;
   display: flex;
   flex-direction: column;
 }

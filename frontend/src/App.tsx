@@ -54,22 +54,23 @@ const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
 const LAYOUT_KEY = "cosca_trader_layout";
-const LAYOUT_VERSION = "v3"; // invalida layouts antigos (API v2 do grid — os antigos usavam a API v1 e ficavam quebrados)
+const LAYOUT_VERSION = "v4"; // invalida layouts antigos (minH reajustado para caber o conteúdo — os anteriores cortavam)
 
 // Layout default do painel (grid de 12 colunas, linhas de 22px — mais
 // compacto e com resize proporcional). O Don pode arrastar e redimensionar
-// cada card — o layout fica salvo no navegador.
+// cada card — o layout fica salvo no navegador. O minH garante que o card
+// nunca fique menor que o conteúdo (senão o conteúdo transborda/é cortado).
 const DEFAULT_LAYOUT: GridLayoutItem[] = [
-  { i: "chart", x: 0, y: 0, w: 8, h: 10, minW: 5, minH: 6 },
-  { i: "positions", x: 8, y: 0, w: 4, h: 6, minW: 3, minH: 4 },
-  { i: "balances", x: 8, y: 6, w: 4, h: 5, minW: 3, minH: 3 },
-  { i: "science", x: 0, y: 10, w: 4, h: 9, minW: 3, minH: 6 },
-  { i: "markets", x: 4, y: 10, w: 4, h: 9, minW: 3, minH: 6 },
-  { i: "convergence", x: 8, y: 11, w: 4, h: 6, minW: 3, minH: 4 },
-  { i: "paper", x: 8, y: 17, w: 4, h: 4, minW: 3, minH: 3 },
-  { i: "risk", x: 0, y: 19, w: 4, h: 5, minW: 3, minH: 3 },
-  { i: "orders", x: 4, y: 19, w: 4, h: 8, minW: 3, minH: 5 },
-  { i: "timeline", x: 8, y: 21, w: 4, h: 6, minW: 3, minH: 4 },
+  { i: "chart", x: 0, y: 0, w: 8, h: 12, minW: 5, minH: 9 },
+  { i: "positions", x: 8, y: 0, w: 4, h: 7, minW: 3, minH: 5 },
+  { i: "balances", x: 8, y: 7, w: 4, h: 5, minW: 3, minH: 4 },
+  { i: "science", x: 0, y: 12, w: 4, h: 11, minW: 3, minH: 9 },
+  { i: "markets", x: 4, y: 12, w: 4, h: 10, minW: 3, minH: 8 },
+  { i: "convergence", x: 8, y: 12, w: 4, h: 7, minW: 3, minH: 5 },
+  { i: "paper", x: 8, y: 19, w: 4, h: 5, minW: 3, minH: 4 },
+  { i: "risk", x: 0, y: 23, w: 4, h: 6, minW: 3, minH: 5 },
+  { i: "orders", x: 4, y: 22, w: 4, h: 11, minW: 3, minH: 9 },
+  { i: "timeline", x: 8, y: 24, w: 4, h: 7, minW: 3, minH: 5 },
 ];
 
 // Carrega o layout salvo (ou o default) do localStorage. Layouts de versão
