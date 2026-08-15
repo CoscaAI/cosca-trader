@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
+	"github.com/CoscaAI/cosca-trader/internal/risk"
 	"github.com/CoscaAI/cosca-trader/internal/store"
+	"github.com/CoscaAI/cosca-trader/internal/strategy"
 )
 
 // fakeHTTPBroker é um broker inerte para exercitar o roteador HTTP do OMS.
@@ -240,5 +243,168 @@ func TestPaperEndpointWithPaperMode(t *testing.T) {
 	}
 	if s.InitialCapital == "" {
 		t.Error("initial_capital ausente no /paper")
+	}
+}
+
+// doJSON executa uma requisição com método e corpo JSON.
+func doJSON(mux *http.ServeMux, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// newPaperOMSMux monta um mux com OMS + paper broker já precificados.
+func newPaperOMSMux(t *testing.T) (*http.ServeMux, *oms.OMS, *paper.Broker) {
+	t.Helper()
+	db, err := store.Open(t.TempDir() + "/t.db")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	e := engine.New(db)
+	pb := paper.New()
+	pb.SetPrice("BTCUSDT", decimal.NewFromFloat(60000))
+	o := oms.New(pb, func(event.Event) error { return nil })
+	mux := newMux(e, o, pb, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
+	return mux, o, pb
+}
+
+func TestBacktestEndpointOffline(t *testing.T) {
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	mux := newMux(e, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	rec := doGET(mux, "/backtest?symbol=BTCUSDT", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/backtest deveria ser 200, veio %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/backtest inválido: %v", err)
+	}
+	if body["strategy"] == nil || body["symbol"] != "BTCUSDT" {
+		t.Errorf("/backtest sem strategy/symbol: %+v", body)
+	}
+	if body["source"] != "sintéticos" {
+		t.Errorf("source = %v, esperava sintéticos (sem rastro persistido)", body["source"])
+	}
+}
+
+func TestRiskEndpoint(t *testing.T) {
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	rm := risk.New(risk.Config{EquityProvider: func() decimal.Decimal { return decimal.NewFromInt(10000) }})
+	mux := newMux(e, nil, nil, rm, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
+	rec := doGET(mux, "/risk", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/risk deveria ser 200, veio %d", rec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("/risk inválido: %v", err)
+	}
+	if body["equity"] == nil {
+		t.Errorf("/risk sem equity: %+v", body)
+	}
+}
+
+func TestRiskEndpointWithoutRisk(t *testing.T) {
+	mux := newTestMux(t, apiSecurity{token: "segredo"})
+	rec := doGET(mux, "/risk", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/risk sem manager deveria ser 503, veio %d", rec.Code)
+	}
+}
+
+func TestConvergenceEndpointNil(t *testing.T) {
+	mux := newTestMux(t, apiSecurity{token: "segredo"})
+	rec := doGET(mux, "/convergence", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/convergence sem monitor deveria ser 503, veio %d", rec.Code)
+	}
+}
+
+func TestMarketsEndpointNil(t *testing.T) {
+	mux := newTestMux(t, apiSecurity{token: "segredo"})
+	rec := doGET(mux, "/markets", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/markets sem radar deveria ser 503, veio %d", rec.Code)
+	}
+}
+
+func TestOrdersEndpointNoOMS(t *testing.T) {
+	mux := newTestMux(t, apiSecurity{token: "segredo"})
+	rec := doGET(mux, "/orders", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/orders sem OMS deveria ser 503, veio %d", rec.Code)
+	}
+}
+
+func TestOrdersPostMarketBuy(t *testing.T) {
+	mux, o, _ := newPaperOMSMux(t)
+	rec := doJSON(mux, http.MethodPost, "/orders",
+		`{"symbol":"BTCUSDT","side":"buy","type":"market","quantity":"0.001"}`,
+		map[string]string{"Authorization": "Bearer segredo", "Content-Type": "application/json"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /orders market deveria ser 200, veio %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := len(o.Orders()); got != 1 {
+		t.Fatalf("esperava 1 ordem registrada, veio %d", got)
+	}
+}
+
+func TestOrdersPostInvalid(t *testing.T) {
+	mux, _, _ := newPaperOMSMux(t)
+	// JSON inválido → 400.
+	rec := doJSON(mux, http.MethodPost, "/orders", `{não é json`,
+		map[string]string{"Authorization": "Bearer segredo", "Content-Type": "application/json"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /orders com JSON inválido deveria ser 400, veio %d", rec.Code)
+	}
+	// Ordem válida em formato mas sem símbolo → 422.
+	rec = doJSON(mux, http.MethodPost, "/orders", `{"symbol":"","side":"buy","type":"market","quantity":"0.001"}`,
+		map[string]string{"Authorization": "Bearer segredo", "Content-Type": "application/json"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /orders sem símbolo deveria ser 422, veio %d", rec.Code)
+	}
+}
+
+func TestOrdersDeleteMissingParams(t *testing.T) {
+	mux, _, _ := newPaperOMSMux(t)
+	rec := doJSON(mux, http.MethodDelete, "/orders", "",
+		map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE /orders sem params deveria ser 400, veio %d", rec.Code)
+	}
+}
+
+func TestBalancesAndLedgerWithOMS(t *testing.T) {
+	mux, o, _ := newPaperOMSMux(t)
+	// Aplica um fill para popular posições/saldos/ledger.
+	o.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "paper", Side: domain.SideBuy, Price: d("60000"), Quantity: d("0.01"), Timestamp: time.Now()})
+
+	for _, path := range []string{"/balances", "/ledger", "/timeline"} {
+		rec := doGET(mux, path, map[string]string{"Authorization": "Bearer segredo"})
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s deveria ser 200, veio %d", path, rec.Code)
+		}
+	}
+}
+
+func TestConvergenceEndpointWithMonitor(t *testing.T) {
+	db, _ := store.Open(t.TempDir() + "/t.db")
+	defer db.Close()
+	e := engine.New(db)
+	tracker := strategy.NewPredictionTracker("ema-cross", 3, 100)
+	conv := strategy.NewConvergence(0.5, tracker, strategy.ConvergenceConfig{})
+	mux := newMux(e, nil, nil, nil, conv, nil, "0", apiSecurity{token: "segredo"}, "shadow")
+	rec := doGET(mux, "/convergence", map[string]string{"Authorization": "Bearer segredo"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/convergence deveria ser 200, veio %d", rec.Code)
 	}
 }

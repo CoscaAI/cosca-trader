@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -278,19 +279,21 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 		defer cancel()
 		bc := binance.New()
 		candles, err := bc.Klines(ctx, sym, iv, bars, min(bars, 1000))
+		source := "binance"
 		if err != nil || len(candles) == 0 {
 			// Fallback: candles do rastro persistido.
 			candles = extractCandles(sym, e)
+			source = "rastro persistido"
 		}
 		if len(candles) == 0 {
-			writeJSON(w, map[string]any{"symbol": sym, "interval": iv, "candles": []any{}})
+			writeJSON(w, map[string]any{"symbol": sym, "interval": iv, "candles": []any{}, "source": "nenhum"})
 			return
 		}
 		writeJSON(w, map[string]any{
 			"symbol":   sym,
 			"interval": iv,
 			"candles":  candles,
-			"source":   "binance",
+			"source":   source,
 		})
 	}))
 
@@ -333,12 +336,23 @@ func (s apiSecurity) originAllowed(r *http.Request) bool {
 
 // authorized é FAIL-CLOSED: sem token configurado ou sem Bearer válido → 401.
 // O token (COSCA_TRADER_TOKEN) é OBRIGATÓRIO em todos os endpoints sensíveis —
-// o modo "desenvolvimento permissivo" foi eliminado.
+// o modo "desenvolvimento permissivo" foi eliminado. A comparação do token é
+// em tempo constante (subtle.ConstantTimeCompare) para não vazar o segredo via
+// timing side-channel.
 func authorized(r *http.Request, token string) bool {
 	if token == "" {
 		return false
 	}
-	return r.Header.Get("Authorization") == "Bearer "+token
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if len(got) <= len(prefix) || got[:len(prefix)] != prefix {
+		return false
+	}
+	gotToken := got[len(prefix):]
+	if len(gotToken) != len(token) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(gotToken), []byte(token)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

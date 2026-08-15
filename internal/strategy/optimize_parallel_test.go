@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -63,4 +64,46 @@ func TestOptimizeWorkerCount(t *testing.T) {
 		t.Fatalf("otimizador não determinístico: %+v vs %+v", r1, r2)
 	}
 	_ = domain.Candle{}
+}
+
+// TestOptimizeInvalidRangeNoHang garante que um ParamRange com Step <= 0 (ou
+// Min > Max) NÃO trava o otimizador em loop infinito — o range inválido é
+// filtrado e a varredura prossegue com os demais (ou vazia).
+func TestOptimizeInvalidRangeNoHang(t *testing.T) {
+	candles := SyntheticCandles(42, "TEST", 100, 100)
+	factory := func() Strategy { return NewContrarian() }
+
+	// Step == 0: antes do fix, v += 0 nunca avança → loop infinito.
+	done := make(chan struct{})
+	go func() {
+		Optimize(factory, nil, candles, decimal.NewFromInt(10000),
+			decimal.NewFromFloat(0.001), []ParamRange{{Name: "x", Min: 0, Max: 10, Step: 0}}, 10, 10, 7, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("otimizador travou com Step == 0 (loop infinito)")
+	}
+
+	// Step < 0: v decrece e a condição v <= Max+eps segue verdadeira.
+	done = make(chan struct{})
+	go func() {
+		Optimize(factory, nil, candles, decimal.NewFromInt(10000),
+			decimal.NewFromFloat(0.001), []ParamRange{{Name: "x", Min: 0, Max: 10, Step: -1}}, 10, 10, 7, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("otimizador travou com Step < 0 (loop infinito)")
+	}
+
+	// Range inválido filtrado → varredura vazia, resultado determinístico com
+	// uma única combinação (vazia).
+	res := Optimize(factory, nil, candles, decimal.NewFromInt(10000),
+		decimal.NewFromFloat(0.001), []ParamRange{{Name: "x", Min: 10, Max: 0, Step: 1}}, 10, 10, 7, 0)
+	if len(res.Ranked) != 1 {
+		t.Fatalf("esperava 1 combinação (vazia) após filtrar range inválido, got %d", len(res.Ranked))
+	}
 }

@@ -44,6 +44,7 @@ type AdaptiveSelector struct {
 	activeName string
 	candles  []domain.Candle // janela deslizante
 	sinceScan int
+	scanCount int             // contador monotônico de scans (seed varia a cada revalidação)
 	lastScan  *ScanResult
 	// scans é o histórico de trocas (para o painel).
 	switches []AdaptiveSwitch
@@ -139,8 +140,13 @@ func (a *AdaptiveSelector) maybeSwitchLocked() {
 	if len(a.candles) < a.cfg.Window {
 		return // janela ainda não cheia
 	}
+	// P2: o seed do Monte Carlo/significância DEVE variar a cada revalidação —
+	// senão o reajuste re-amostra sempre a mesma permutação (o `+sinceScan`
+	// era código morto, pois sinceScan era zerado antes da chamada). scanCount
+	// é monotônico e nunca zera.
+	a.scanCount++
 	scan := Scan(a.candles, a.cfg.InitialCapital, a.cfg.FeePct,
-		a.cfg.Gate, a.cfg.MonteCarloSims, a.cfg.SigTrials, a.cfg.SeedBase+int64(a.sinceScan))
+		a.cfg.Gate, a.cfg.MonteCarloSims, a.cfg.SigTrials, a.cfg.SeedBase+int64(a.scanCount))
 	a.lastScan = &scan
 
 	if scan.Best == nil || scan.Best.Name == a.activeName {

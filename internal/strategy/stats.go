@@ -101,11 +101,19 @@ func computeStats(trades []TradeResult, initial decimal.Decimal) Stats {
 	// Passada 1: agregação bruta + curve de equity.
 	equity := initial
 	pnls := make([]float64, 0, len(trades))
+	rets := make([]float64, 0, len(trades)) // retorno por trade (PnL / equity anterior)
 	equityCurve := make([]EquityPoint, 0, len(trades))
 	peak := equity
 	maxDD := decimal.Zero
 
 	for i, t := range trades {
+		// Retorno por trade = PnL sobre o capital ANTES do trade (o que foi
+		// posto em risco). É esta série que o Sharpe/Sortino/Volatility medem
+		// — não o PnL monetário absoluto, que cresce com o equity e não é
+		// estacionário.
+		if equity.IsPositive() {
+			rets = append(rets, t.PnL.Div(equity).InexactFloat64())
+		}
 		equity = equity.Add(t.PnL)
 		pnls = append(pnls, t.PnL.InexactFloat64())
 		equityCurve = append(equityCurve, EquityPoint{Index: i, Equity: equity})
@@ -164,29 +172,24 @@ func computeStats(trades []TradeResult, initial decimal.Decimal) Stats {
 		s.MaxDrawdownPct = maxDD.Div(initial).InexactFloat64()
 	}
 
-	// Estatística descritiva dos retornos por trade (float apenas aqui).
-	avg := mean(pnls)
-	std := stdDev(pnls, avg)
+	// Estatística descritiva dos RETORNOS por trade (float apenas aqui). Sharpe
+	// e Sortino são razões de retorno (adimensional) — calcular sobre PnL
+	// monetário distorce a média/desvio (o PnL absoluto cresce com o equity).
+	avg := mean(rets)
+	std := stdDev(rets, avg)
+	s.VolatilityPct = std * 100 // std dos retornos por trade, em %
 	if std > 0 {
 		s.Sharpe = (avg / std) * math.Sqrt(252)
-		s.VolatilityPct = std
-		// Sortino: downside deviation (só retornos negativos).
+		// Sortino: downside deviation dos retornos centrada em 0 (MAR), não na
+		// média dos perdedores. dstd = √(Σ min(0, r)² / N).
 		var downsideSq float64
-		var downs []float64
-		for _, p := range pnls {
-			if p < 0 {
-				downs = append(downs, p)
-			}
+		for _, r := range rets {
+			d := math.Min(r, 0)
+			downsideSq += d * d
 		}
-		if len(downs) > 0 {
-			dmean := mean(downs)
-			for _, p := range downs {
-				downsideSq += (p - dmean) * (p - dmean)
-			}
-			dstd := math.Sqrt(downsideSq / float64(len(downs)))
-			if dstd > 0 {
-				s.Sortino = (avg / dstd) * math.Sqrt(252)
-			}
+		dstd := math.Sqrt(downsideSq / float64(len(rets)))
+		if dstd > 0 {
+			s.Sortino = (avg / dstd) * math.Sqrt(252)
 		}
 	}
 

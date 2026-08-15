@@ -149,8 +149,15 @@ func walkForward(s Strategy, candles []domainCandle, initial, feePct decimal.Dec
 	trainCandles := candles[:cut]
 	testCandles := candles[cut:]
 
+	// Instâncias ZERADAS por split: a estratégia mantém estado por símbolo
+	// (EMAs, RSI, janelas), então reusar a instância que já rodou sobre o
+	// histórico INTEIRO vazaria o futuro (período de teste) para o treino — e
+	// vice-versa. É o look-ahead bias que o walk-forward existe para detectar.
+	trainStrat := freshStrategy(s)
+	testStrat := freshStrategy(s)
+
 	// Treino.
-	trainTrades := backtestTrades(s, trainCandles, initial, feePct)
+	trainTrades := backtestTrades(trainStrat, trainCandles, initial, feePct)
 	res.TrainBars = len(trainCandles)
 	res.TrainTrades = len(trainTrades)
 	res.TrainPnL = sumPnL(trainTrades)
@@ -158,7 +165,7 @@ func walkForward(s Strategy, candles []domainCandle, initial, feePct decimal.Dec
 	// Teste (out-of-sample): o equity inicial do teste é o final do treino —
 	// capital contínuo, como na operação real.
 	capital := initial.Add(res.TrainPnL)
-	testTrades := backtestTrades(s, testCandles, capital, feePct)
+	testTrades := backtestTrades(testStrat, testCandles, capital, feePct)
 	res.TestBars = len(testCandles)
 	res.TestTrades = len(testTrades)
 	res.TestPnL = sumPnL(testTrades)
@@ -305,6 +312,17 @@ func backtestTradesWith(s Strategy, candles []domainCandle, initial, feePct deci
 		finish(slip(last, entrySide != "buy"), "end", len(candles))
 	}
 	return out
+}
+
+// freshStrategy devolve uma instância ZERADA da estratégia (mesmo nome), para
+// isolar o estado entre splits (treino/teste) e eliminar o look-ahead bias. Se
+// a estratégia não estiver no registry (ex.: plugin inline), devolve a instância
+// recebida — o chamador é responsável por zerar o estado nesse caso.
+func freshStrategy(s Strategy) Strategy {
+	if ns, err := NewByName(s.Name()); err == nil {
+		return ns
+	}
+	return s
 }
 
 func sumPnL(trades []TradeResult) decimal.Decimal {

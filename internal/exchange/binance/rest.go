@@ -68,7 +68,7 @@ func (c *Client) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 	if err := c.ensureInfo(ctx); err != nil {
 		return domain.Order{}, err
 	}
-	if err := c.applySymbolRules(&req); err != nil {
+	if err := c.applySymbolRules(ctx, &req); err != nil {
 		return domain.Order{}, err
 	}
 

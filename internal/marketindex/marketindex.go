@@ -158,12 +158,14 @@ func (c *Client) fetchOne(ctx context.Context, a Asset) (Quote, error) {
 				vals = append(vals, *c)
 			}
 		}
-		if len(vals) > 1 {
+		if len(vals) > 1 && vals[0] != 0 {
 			q.Change10d = (vals[len(vals)-1] - vals[0]) / vals[0] * 100
 		}
 		if len(vals) > 5 {
 			start := vals[len(vals)-5]
-			q.Change5d = (vals[len(vals)-1] - start) / start * 100
+			if start != 0 {
+				q.Change5d = (vals[len(vals)-1] - start) / start * 100
+			}
 		}
 	}
 	return q, nil

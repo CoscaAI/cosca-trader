@@ -141,7 +141,7 @@ func (i *Info) RefreshIfStale(ctx context.Context, maxAge time.Duration) error {
 // applySymbolRules valida e arredonda a ordem contra as regras do símbolo
 // (P1-1). Fail-closed: sem metadados ou abaixo do mínimo → erro claro, nunca
 // envia ordem inválida.
-func (c *Client) applySymbolRules(req *exchange.OrderRequest) error {
+func (c *Client) applySymbolRules(ctx context.Context, req *exchange.OrderRequest) error {
 	info, ok := c.symbolInfo(req.Symbol)
 	if !ok {
 		return fmt.Errorf("binance: símbolo %q sem metadados de instrumento (exchangeInfo)", req.Symbol)
@@ -158,9 +158,18 @@ func (c *Client) applySymbolRules(req *exchange.OrderRequest) error {
 		return fmt.Errorf("binance: quantidade %s abaixo do mínimo %s de %s", req.Quantity, info.MinQty, req.Symbol)
 	}
 	if info.MinNotional.Sign() > 0 {
-		notional := req.Quantity
-		if req.Price.Sign() > 0 {
-			notional = req.Price.Mul(req.Quantity)
+		// P1: notional é preço×quantidade em QUOTE. Em ordem MARKET o preço é
+		// zero — comparar quantidade (base) com notional (quote) rejeitaria
+		// ordens market válidas (0.0005 BTC < 5 USDT). Estima pelo preço
+		// corrente; se indisponível, deixa a exchange decidir (a camada OMS já
+		// validou o mínimo com o mesmo critério).
+		notional := req.Price.Mul(req.Quantity)
+		if req.Price.Sign() <= 0 {
+			if px, err := c.Price(ctx, req.Symbol); err == nil && px.Sign() > 0 {
+				notional = px.Mul(req.Quantity)
+			} else {
+				return nil // sem preço de referência → não false-rejeitar
+			}
 		}
 		if notional.LessThan(info.MinNotional) {
 			return fmt.Errorf("binance: notional %s abaixo do mínimo %s de %s", notional, info.MinNotional, req.Symbol)

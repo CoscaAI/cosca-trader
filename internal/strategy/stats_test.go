@@ -149,6 +149,32 @@ func TestWalkForwardConsistent(t *testing.T) {
 	_ = wf.Consistent
 }
 
+func TestWalkForwardUsesFreshState(t *testing.T) {
+	// REGRESSÃO (look-ahead bias): a estratégia mantém estado por símbolo
+	// (EMAs). Se walkForward reutilizasse a instância que já rodou sobre o
+	// histórico INTEIRO, o estado "aquecido" vazaria o período de teste para o
+	// treino. O fix garante instâncias zeradas por split: o resultado deve ser
+	// IDÊNTICO quer a instância de entrada esteja aquecida ou zerada.
+	candles := SyntheticCandles(11, "BTCUSDT", 300, 50000)
+
+	// Aquece uma instância sobre o histórico completo (simula o backtest
+	// principal que roda ANTES do walk-forward dentro de AnalyzeBacktestWith).
+	warm := NewEMACross()
+	backtestTrades(warm, candles, d("10000"), d("0.001"))
+
+	gotWarm := walkForward(warm, candles, d("10000"), d("0.001"), 0.70, 5)
+	gotFresh := walkForward(NewEMACross(), candles, d("10000"), d("0.001"), 0.70, 5)
+
+	if !gotWarm.TrainPnL.Equal(gotFresh.TrainPnL) || !gotWarm.TestPnL.Equal(gotFresh.TestPnL) {
+		t.Fatalf("walkForward vazou estado: warm(train=%s test=%s) != fresh(train=%s test=%s)",
+			gotWarm.TrainPnL, gotWarm.TestPnL, gotFresh.TrainPnL, gotFresh.TestPnL)
+	}
+	if gotWarm.TrainTrades != gotFresh.TrainTrades || gotWarm.TestTrades != gotFresh.TestTrades {
+		t.Fatalf("walkForward vazou estado nos trades: warm(train=%d test=%d) != fresh(train=%d test=%d)",
+			gotWarm.TrainTrades, gotWarm.TestTrades, gotFresh.TrainTrades, gotFresh.TestTrades)
+	}
+}
+
 func TestAnalyzeBacktestReport(t *testing.T) {
 	candles := SyntheticCandles(99, "BTCUSDT", 500, 50000)
 	s := NewEMACross()

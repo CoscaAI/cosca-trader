@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -845,12 +846,18 @@ func runScanMulti(symbolsCSV, intervalsCSV string, bars int) {
 	}
 
 	// Ranking GLOBAL por score.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Strategy.Score > all[j].Strategy.Score
+	})
 	log.Printf("═══════════ RANKING GLOBAL (%d combinações símbolo×intervalo×estratégia) ═══════════", len(all))
-	top := all[:0]
-	for i := 0; i < len(all) && i < 10; i++ {
-		top = append(top, all[i])
+	limit := 10
+	if len(all) < limit {
+		limit = len(all)
 	}
-	_ = top // (ranking completo já logado por par)
+	for i := 0; i < limit; i++ {
+		r := all[i]
+		log.Printf("  #%d  %-14s %s %s — score %.1f", i+1, r.Strategy.Name, r.Symbol, r.Interval, r.Strategy.Score)
+	}
 
 	if best != nil {
 		log.Printf("🏆🏆 MELHOR APROVADA NO PORTÃO: %s em %s %s (score %.1f) — CANDIDATA À CHAVE", best.Strategy.Name, best.Symbol, best.Interval, best.Strategy.Score)

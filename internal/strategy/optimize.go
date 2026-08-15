@@ -49,6 +49,19 @@ type ParamSetter func(s Strategy, name string, value float64)
 func Optimize(factory Factory, setter ParamSetter, candles []domain.Candle, initial, feePct decimal.Decimal, ranges []ParamRange, mcSims, sigTrials int, seed int64, top int) OptimizeResult {
 	res := OptimizeResult{Strategy: "optimize", Params: map[string]float64{}, Ranked: []OptimizeResult{}}
 
+	// P2: filtra ranges inválidos ANTES do produto cartesiano. Step <= 0 causaria
+	// loop infinito (v não avança/decrementa); Min > Max é intervalo vazio.
+	// Um range inválido é ignorado — os índices do combo e do setter continuam
+	// alinhados porque ambos passam a usar a mesma lista filtrada.
+	var valid []ParamRange
+	for _, r := range ranges {
+		if r.Step <= 0 || r.Min > r.Max {
+			continue
+		}
+		valid = append(valid, r)
+	}
+	ranges = valid
+
 	// Gera todas as combinações via cartesian product dos ranges.
 	combos := [][]float64{{}}
 	for _, r := range ranges {
