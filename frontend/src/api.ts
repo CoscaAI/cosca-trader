@@ -47,6 +47,14 @@ export class CoreClient {
     return (await r.json()) as Health;
   }
 
+  // ticker busca o preço corrente de um símbolo (Binance REST público — sem
+  // auth, funciona mesmo sem token configurado).
+  async ticker(symbol: string): Promise<{ symbol: string; price: string }> {
+    const r = await fetch(`/ticker?symbol=${encodeURIComponent(symbol)}`);
+    if (!r.ok) throw new Error(`/ticker ${r.status}`);
+    return (await r.json()) as { symbol: string; price: string };
+  }
+
   async positions(): Promise<Position[]> {
     return this.get<Position[]>("/positions");
   }

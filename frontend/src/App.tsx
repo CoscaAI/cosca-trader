@@ -154,6 +154,31 @@ function useHealth() {
   return { health, healthErr };
 }
 
+// Ticker de preço (Binance REST) — polling leve a cada 5s, funciona SEM token
+// (endpoint público). Complementa o SSE: mostra o preço mesmo quando o market
+// data WebSocket ainda não conectou.
+function useTicker(symbol: string): string | null {
+  const [price, setPrice] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const poll = () => {
+      fetch(`/ticker?symbol=${encodeURIComponent(symbol)}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject()))
+        .then((t: { price: string }) => alive && setPrice(t.price))
+        .catch(() => {
+          /* offline: mantém o último preço */
+        });
+    };
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [symbol]);
+  return price;
+}
+
 // ── gráfico candlestick (lightweight-charts) ────────────────────────────────
 
 function CandlestickChart({
@@ -724,6 +749,7 @@ function Timeline({ events }: { events: StreamEvent[] }) {
 
 export default function App() {
   const { health, healthErr } = useHealth();
+  const btcPrice = useTicker("BTCUSDT");
   const [token, setToken] = useState<string>(
     () => localStorage.getItem(TOKEN_KEY) ?? "",
   );
@@ -940,6 +966,10 @@ export default function App() {
           <ModeBadge mode={health?.mode} hasToken={token !== ""} />
         </div>
         <div className="topbar-right">
+          <div className="btc-ticker" title="preço do Bitcoin (Binance)">
+            <span className="btc-symbol">₿</span>
+            <span className="btc-price">{btcPrice ? fmtMoney(btcPrice, 2) : "—"}</span>
+          </div>
           <input
             className="token-input"
             type="password"

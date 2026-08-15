@@ -62,6 +62,28 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 		})
 	})
 
+	// /ticker — preço corrente de um símbolo via Binance REST (endpoint
+	// PÚBLICO, sem chave). Dado de mercado inofensivo (não expõe conta/ordens/
+	// saldos) — por isso fica fora da política de auth, como o /health.
+	mux.HandleFunc("/ticker", func(w http.ResponseWriter, r *http.Request) {
+		sym := r.URL.Query().Get("symbol")
+		if sym == "" {
+			sym = "BTCUSDT"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		price, err := binance.New().Price(ctx, sym)
+		if err != nil {
+			http.Error(w, "preço indisponível: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"symbol":   sym,
+			"price":    price.String(),
+			"exchange": "binance",
+		})
+	})
+
 	// /timeline — rastro total (sensível: ordens, saldos, posições, PnL).
 	mux.HandleFunc("/timeline", sec.secure(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
