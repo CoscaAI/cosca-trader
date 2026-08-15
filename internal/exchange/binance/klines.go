@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/CoscaAI/cosca-trader/internal/domain"
+	"github.com/CoscaAI/cosca-trader/internal/exchange"
 )
 
 // KlineResponse é UM elemento do array devolvido por /api/v3/klines.
@@ -80,11 +81,11 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, bars, limi
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("klines: %s %s: %w", symbol, interval, err)
+			return nil, exchange.Wrap(exchange.KindTransient, fmt.Errorf("klines: %s %s: %w", symbol, interval, err))
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, fmt.Errorf("klines: %s %s: HTTP %d", symbol, interval, resp.StatusCode)
+			return nil, exchange.Wrap(classifyStatus(resp.StatusCode), fmt.Errorf("klines: %s %s: HTTP %d", symbol, interval, resp.StatusCode))
 		}
 
 		var raw []json.RawMessage

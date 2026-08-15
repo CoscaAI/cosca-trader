@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/CoscaAI/cosca-trader/internal/clock"
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/event"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
@@ -74,6 +75,14 @@ type OMS struct {
 	tpPct                decimal.Decimal
 	trailingActivationPct decimal.Decimal // PnL % que ativa o trailing
 	trailingPct          decimal.Decimal  // distância do trailing abaixo do maior mark
+
+	// clk é a fonte de tempo (padrão EngineClock do barter-rs): live usa
+	// clock.Real(), backtest/replay usa clock.Fixed — o MESMO OMS roda nos dois.
+	clk clock.Clock
+
+	// rebalanceMu serializa SetTargetPosition por OMS (padrão smart order do
+	// OpenAlgo: lock por símbolo evita race entre alvos concorrentes).
+	rebalanceMu sync.Mutex
 }
 
 // Option configura o OMS no New.
@@ -135,6 +144,12 @@ func WithTrailingStop(activationPct, trailPct decimal.Decimal) Option {
 	}
 }
 
+// WithClock injeta a fonte de tempo do OMS. Útil em backtest/replay
+// determinístico (clock.Fixed) — o OMS não usa time.Now() diretamente.
+func WithClock(c clock.Clock) Option {
+	return func(o *OMS) { o.clk = c }
+}
+
 // New cria o OMS sobre um broker, emitindo eventos via emit. O emit devolve
 // erro (ex.: engine.Emit) — para eventos de dinheiro, falha = fail-stop.
 func New(broker exchange.Broker, emit func(event.Event) error, opts ...Option) *OMS {
@@ -150,11 +165,54 @@ func New(broker exchange.Broker, emit func(event.Event) error, opts ...Option) *
 		seenTrades:   make(map[string]struct{}),
 		maxOrderUSDT: decimal.Zero, // permissivo como biblioteca; main.go impõe 1000
 		lastMarkEmit: make(map[string]time.Time),
+		clk:          clock.Real(),
 	}
 	for _, opt := range opts {
 		opt(o)
 	}
 	return o
+}
+
+// SetTargetPosition move a posição de symbol para o alvo `target` (delta-based,
+// idempotente — padrão "smart order" do OpenAlgo). `target` é a exposição
+// líquida desejada: positivo = long, negativo = short, zero = flat. Processar
+// o MESMO target duas vezes produz a MESMA posição final (delta zero → no-op) —
+// é a solução correta para entrega duplicada (webhook/LLM/restart).
+//
+// A ordem de ajuste passa pelo fluxo completo de PlaceOrder (validação,
+// notional, risco, intent durável, saga de recuperação, client_order_id).
+func (o *OMS) SetTargetPosition(ctx context.Context, symbol, exchangeName string, target decimal.Decimal) (*domain.Order, error) {
+	o.rebalanceMu.Lock()
+	defer o.rebalanceMu.Unlock()
+
+	// Exposição líquida corrente (short = negativa).
+	current := decimal.Zero
+	if p, ok := o.Position(symbol, exchangeName); ok && p.IsOpen() {
+		current = p.Quantity
+		if p.Side == domain.SideSell {
+			current = current.Neg()
+		}
+	}
+
+	delta := target.Sub(current)
+	if delta.IsZero() {
+		return nil, nil // já no alvo — idempotente, nenhuma ordem
+	}
+
+	side := domain.SideBuy
+	qty := delta
+	if delta.IsNegative() {
+		side = domain.SideSell
+		qty = delta.Neg()
+	}
+
+	return o.PlaceOrder(ctx, exchange.OrderRequest{
+		Symbol:        symbol,
+		Side:          side,
+		Type:          domain.OrderMarket,
+		Quantity:      qty,
+		ClientOrderID: "target-" + symbol + "-" + uuid.NewString(),
+	})
 }
 
 // SetKillSwitch liga/desliga o kill switch local. Quando ativo, PlaceOrder
@@ -287,8 +345,8 @@ func (o *OMS) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (*domai
 			Price:         req.Price,
 			Quantity:      req.Quantity,
 			Status:        store.IntentPending,
-			CreatedAt:     time.Now(),
-			UpdatedAt:     time.Now(),
+			CreatedAt:     o.clk.Now(),
+			UpdatedAt:     o.clk.Now(),
 		}); err != nil {
 			o.mu.Lock()
 			delete(o.pending, req.ClientOrderID)
@@ -656,7 +714,7 @@ func (o *OMS) ApplyMarkPrice(symbol, exchange string, mark decimal.Decimal) {
 		return // preço inválido nunca toca o estado monetário
 	}
 	key := posKey(symbol, exchange)
-	now := time.Now()
+	now := o.clk.Now()
 
 	o.mu.Lock()
 	pos := o.positions[key]

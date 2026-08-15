@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/CoscaAI/cosca-trader/internal/exchange"
 )
 
 // signedRequest monta e executa uma requisição autenticada. Os parâmetros
@@ -39,16 +41,17 @@ func (c *Client) signedRequest(ctx context.Context, method, path string, params 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		// Não incluir a URL (que carrega a signature) na mensagem de erro.
-		return fmt.Errorf("binance: requisição %s %s falhou", method, path)
+		// Rede/timeout → transitório (retryable) — a saga de recuperação usa isso.
+		return exchange.Wrap(exchange.KindTransient, fmt.Errorf("binance: requisição %s %s falhou", method, path))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return exchange.Wrap(exchange.KindTransient, err)
 	}
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("binance %s %s: %d %s", method, path, resp.StatusCode, string(body))
+		return exchange.Wrap(classifyStatus(resp.StatusCode), fmt.Errorf("binance %s %s: %d %s", method, path, resp.StatusCode, string(body)))
 	}
 	if out != nil {
 		if err := json.Unmarshal(body, out); err != nil {

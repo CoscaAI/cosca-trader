@@ -24,6 +24,11 @@ type Strategy interface {
 // sugerido pela estratégia (opcional — usado pelo sizing por risco; zero =
 // a estratégia não propõe stop e o motor usa o stop-loss global). Dinheiro
 // em decimal.
+//
+// Fase Insight (padrão Lean: Insight = direção + magnitude + confiança):
+// Magnitude e Confidence enriquecem o sinal com a força da convicção — o
+// scanner/seletor adaptativo e o módulo de significância medem a QUALIDADE do
+// alpha sobre esses campos, não só o acerto binário.
 type Signal struct {
 	Symbol string          `json:"symbol"`
 	Side   string          `json:"side"` // "buy" | "sell"
@@ -31,6 +36,10 @@ type Signal struct {
 	Price  decimal.Decimal `json:"price"`
 	Stop   decimal.Decimal `json:"stop,omitempty"`
 	Reason string          `json:"reason"`
+	// Magnitude é a variação % prevista (ex.: 0.03 = +3%). Zero = não declarada.
+	Magnitude float64 `json:"magnitude,omitempty"`
+	// Confidence é a convicção do sinal em [0,1]. Zero = não declarada.
+	Confidence float64 `json:"confidence,omitempty"`
 }
 
 // SmartOrderType infere o tipo de ordem a partir do preço-alvo vs o preço

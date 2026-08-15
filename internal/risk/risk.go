@@ -6,6 +6,11 @@
 //
 // Princípio da casa: a camada de risco NUNCA deixa de proteger — se o
 // EquityProvider falhar, o comportamento é fail-closed (trava trading).
+//
+// Fase Rule (padrão IRiskRule do StockSharp / RiskCheck do barter-rs): as
+// checagens estateless (exposição, exposição total, ordens abertas) são REGRAS
+// plugáveis que compõem um []Rule — adicionar/remover uma regra não toca o
+// core. As checagens stateful (rate limit, drawdown/halt) ficam no Manager.
 package risk
 
 import (
@@ -27,6 +32,104 @@ var (
 	ErrRateLimited        = errors.New("rate limit local de ordens excedido")
 	ErrEquityUnavailable  = errors.New("equity indisponível — fail-closed: trading bloqueado")
 )
+
+// Rule é uma checagem de risco plugável e composável. Check valida uma ordem
+// candidata contra uma restrição e devolve erro se violada. Regras são
+// STATELESS: o contexto vem do Input e do regime macro.
+type Rule interface {
+	// Name identifica a regra (para telemetria/auditoria).
+	Name() string
+	// Check valida a ordem candidata. nil = aprovada; erro = recusada.
+	Check(in Input) error
+}
+
+// Input é o contexto que uma regra avalia (a ordem candidata + o estado).
+type Input struct {
+	// Notional é o valor estimado da ordem candidata (preço × quantidade).
+	Notional decimal.Decimal
+	// Positions é o snapshot das posições abertas.
+	Positions []domain.Position
+	// OpenOrders é o número de ordens abertas correntes.
+	OpenOrders int
+	// Equity é o equity corrente (já validado positivo pelo Manager).
+	Equity decimal.Decimal
+	// Regime é o regime macro global: "risk-on" | "risk-off" | "cautela" | "desconhecido".
+	Regime string
+}
+
+// ExposureRule limita a exposição por símbolo (fração do equity). Em risk-off
+// global, o limite cai pela metade (proteção macro — a missão do Don).
+type ExposureRule struct {
+	// MaxPct é a fração máxima do equity em posição por símbolo. Zero desativa.
+	MaxPct decimal.Decimal
+}
+
+func (r ExposureRule) Name() string { return "exposure" }
+
+func (r ExposureRule) Check(in Input) error {
+	limit := r.MaxPct
+	if in.Regime == "risk-off" {
+		limit = limit.Div(decimal.NewFromInt(2))
+	}
+	if !limit.IsPositive() || !in.Notional.IsPositive() {
+		return nil
+	}
+	symExpo := in.Notional.Div(in.Equity)
+	if symExpo.GreaterThan(limit) {
+		msg := "exposição " + symExpo.String() + " excede " + limit.String() + " do equity"
+		if in.Regime == "risk-off" {
+			msg = "RISK-OFF global: " + msg + " (limite reduzido pela metade — proteção macro)"
+		}
+		return errors.Join(ErrExposureExceeded, errors.New(msg))
+	}
+	return nil
+}
+
+// TotalExposureRule limita a exposição total da carteira (fração do equity).
+// Também cai pela metade em risk-off.
+type TotalExposureRule struct {
+	// MaxPct é a fração máxima do equity em posição no total. Zero desativa.
+	MaxPct decimal.Decimal
+}
+
+func (r TotalExposureRule) Name() string { return "total_exposure" }
+
+func (r TotalExposureRule) Check(in Input) error {
+	limit := r.MaxPct
+	if in.Regime == "risk-off" {
+		limit = limit.Div(decimal.NewFromInt(2))
+	}
+	if !limit.IsPositive() {
+		return nil
+	}
+	total := decimal.Zero
+	for _, p := range in.Positions {
+		if !p.IsOpen() {
+			continue
+		}
+		total = total.Add(p.AvgEntryPrice.Mul(p.Quantity))
+	}
+	total = total.Add(in.Notional)
+	if total.Div(in.Equity).GreaterThan(limit) {
+		return ErrTotalExposureLimit
+	}
+	return nil
+}
+
+// OpenOrdersRule limita ordens abertas simultâneas.
+type OpenOrdersRule struct {
+	// Max é o número máximo de ordens abertas. Zero = ilimitado.
+	Max int
+}
+
+func (r OpenOrdersRule) Name() string { return "open_orders" }
+
+func (r OpenOrdersRule) Check(in Input) error {
+	if r.Max > 0 && in.OpenOrders >= r.Max {
+		return ErrTooManyOpenOrders
+	}
+	return nil
+}
 
 // State é o estado corrente do gerenciador de risco — exposto via GET /risk
 // e usado pelo frontend para o painel de risco.
@@ -70,11 +173,16 @@ type Config struct {
 	// "cautela" ou "desconhecido" (proteção macro — a missão do Don de
 	// monitorar S&P/NASDAQ/ouro). nil = sem monitor macro.
 	MacroRegime func() string
+	// Rules substitui a lista padrão de regras (exposição, exposição total,
+	// ordens abertas) por uma lista customizada. nil = regras padrão derivadas
+	// dos campos acima.
+	Rules []Rule
 }
 
 // Manager é o gerenciador de risco thread-safe.
 type Manager struct {
-	cfg Config
+	cfg   Config
+	rules []Rule
 
 	mu         sync.Mutex
 	peakEquity decimal.Decimal
@@ -84,9 +192,18 @@ type Manager struct {
 	riskWarned bool        // evita emitir RiskWarning a cada equity update
 }
 
-// New cria o Manager com as regras dadas.
+// New cria o Manager com as regras dadas (customizadas ou padrão).
 func New(cfg Config) *Manager {
 	m := &Manager{cfg: cfg}
+	if cfg.Rules != nil {
+		m.rules = cfg.Rules
+	} else {
+		m.rules = []Rule{
+			ExposureRule{MaxPct: cfg.MaxExposurePct},
+			TotalExposureRule{MaxPct: cfg.MaxTotalExposurePct},
+			OpenOrdersRule{Max: cfg.MaxOpenOrders},
+		}
+	}
 	if cfg.EquityProvider != nil {
 		if eq := cfg.EquityProvider(); eq.IsPositive() {
 			m.peakEquity = eq
@@ -94,6 +211,9 @@ func New(cfg Config) *Manager {
 	}
 	return m
 }
+
+// Rules devolve as regras ativas (para inspeção/telemetria).
+func (m *Manager) Rules() []Rule { return m.rules }
 
 // Check valida UMA ordem candidata contra todas as regras, ANTES do envio.
 // Deve ser chamada no topo do PlaceOrder (fail rápido, sem gastar
@@ -113,7 +233,7 @@ func (m *Manager) Check(notional decimal.Decimal, positions []domain.Position, o
 		return errors.Join(ErrDrawdownBreach, errors.New(m.haltReason))
 	}
 
-	// Rate limit local de ordens.
+	// Rate limit local de ordens (stateful — vive no Manager).
 	if m.cfg.MaxOrdersPerMinute > 0 {
 		now := time.Now()
 		cutoff := now.Add(-time.Minute)
@@ -134,52 +254,24 @@ func (m *Manager) Check(notional decimal.Decimal, positions []domain.Position, o
 		return errors.Join(ErrEquityUnavailable, errors.New("equity <= 0"))
 	}
 
-	// Proteção MACRO (a missão do Don): em risk-off global, a exposição
-	// permitida cai pela metade — o mundo está em aversão ao risco, não se
-	// entra pesado no cripto.
-	expoLimit := m.cfg.MaxExposurePct
-	totalLimit := m.cfg.MaxTotalExposurePct
 	regime := ""
 	if m.cfg.MacroRegime != nil {
 		regime = m.cfg.MacroRegime()
 	}
-	if regime == "risk-off" {
-		expoLimit = expoLimit.Div(decimal.NewFromInt(2))
-		totalLimit = totalLimit.Div(decimal.NewFromInt(2))
-	}
 
-	// Exposição pós-ordem por símbolo.
-	if expoLimit.IsPositive() && notional.IsPositive() {
-		symExpo := notional.Div(equity)
-		if symExpo.GreaterThan(expoLimit) {
-			msg := "exposição " + symExpo.String() + " excede " + expoLimit.String() + " do equity"
-			if regime == "risk-off" {
-				msg = "RISK-OFF global: " + msg + " (limite reduzido pela metade — proteção macro)"
-			}
-			return errors.Join(ErrExposureExceeded, errors.New(msg))
+	// Regras plugáveis (exposição, exposição total, ordens abertas...).
+	in := Input{
+		Notional:   notional,
+		Positions:  positions,
+		OpenOrders: openOrders,
+		Equity:     equity,
+		Regime:     regime,
+	}
+	for _, r := range m.rules {
+		if err := r.Check(in); err != nil {
+			return err
 		}
 	}
-
-	// Exposição total da carteira (pós-ordem).
-	if totalLimit.IsPositive() {
-		total := decimal.Zero
-		for _, p := range positions {
-			if !p.IsOpen() {
-				continue
-			}
-			total = total.Add(p.AvgEntryPrice.Mul(p.Quantity))
-		}
-		total = total.Add(notional)
-		if total.Div(equity).GreaterThan(totalLimit) {
-			return ErrTotalExposureLimit
-		}
-	}
-
-	// Ordens abertas.
-	if m.cfg.MaxOpenOrders > 0 && openOrders >= m.cfg.MaxOpenOrders {
-		return ErrTooManyOpenOrders
-	}
-
 	return nil
 }
 

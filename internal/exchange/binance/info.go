@@ -17,6 +17,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
+	"github.com/CoscaAI/cosca-trader/internal/quantize"
 )
 
 // SymbolInfo são as regras de negociação de um símbolo, derivadas do
@@ -179,21 +180,16 @@ func (c *Client) applySymbolRules(ctx context.Context, req *exchange.OrderReques
 }
 
 // roundQty arredonda a quantidade para múltiplo de step_size, SEMPRE para
-// baixo (nunca excede o lote permitido pela exchange).
+// baixo (nunca excede o lote permitido pela exchange). Delega ao pacote
+// quantize (padrão decimal_to_precision do ccxt).
 func roundQty(qty, step decimal.Decimal) decimal.Decimal {
-	if step.Sign() <= 0 {
-		return qty
-	}
-	return qty.Div(step).Floor().Mul(step)
+	return quantize.TruncateToStep(qty, step)
 }
 
 // roundPrice arredonda o preço para múltiplo de tick_size (arredondamento
-// comercial — sempre um preço válido na exchange).
+// comercial — sempre um preço válido na exchange). Delega ao quantize.
 func roundPrice(price, tick decimal.Decimal) decimal.Decimal {
-	if tick.Sign() <= 0 {
-		return price
-	}
-	return price.Div(tick).Round(0).Mul(tick)
+	return quantize.RoundToTick(price, tick)
 }
 
 // Price devolve o preço corrente de um símbolo (GET /api/v3/ticker/price —

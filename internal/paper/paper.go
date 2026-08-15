@@ -37,6 +37,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/CoscaAI/cosca-trader/internal/clock"
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 )
@@ -82,6 +83,7 @@ type Broker struct {
 	handler     exchange.Handler
 	nextOrderID int64
 	nextTradeID int64
+	clk         clock.Clock // fonte de tempo (EngineClock) — live=Real, backtest=Fixed
 }
 
 // Option configura o Broker no New.
@@ -119,6 +121,12 @@ func WithFillLatency(d time.Duration) Option {
 	return func(b *Broker) { b.fillLatency = d }
 }
 
+// WithClock injeta a fonte de tempo do paper broker — útil em replay
+// determinístico onde o timestamp dos fills deve vir do evento histórico.
+func WithClock(c clock.Clock) Option {
+	return func(b *Broker) { b.clk = c }
+}
+
 // New cria o broker de papel com o capital virtual default.
 func New(opts ...Option) *Broker {
 	b := &Broker{
@@ -129,6 +137,7 @@ func New(opts ...Option) *Broker {
 		prices:      make(map[string]decimal.Decimal),
 		avgPrice:    make(map[string]decimal.Decimal),
 		reserved:    make(map[string]decimal.Decimal),
+		clk:         clock.Real(),
 	}
 	b.balances["USDT"] = domain.Balance{Asset: "USDT", Free: decimal.NewFromInt(10000)}
 	for _, h := range demoHoldings {
@@ -201,8 +210,8 @@ func (b *Broker) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (dom
 		Quantity:      req.Quantity,
 		Status:        domain.OrderNew,
 		TimeInForce:   req.TimeInForce,
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
+		CreatedAt:     b.clk.Now(),
+		UpdatedAt:     b.clk.Now(),
 	}
 	b.clientIndex[ord.ClientOrderID] = ord.ID
 
@@ -262,7 +271,7 @@ func (b *Broker) CancelOrder(_ context.Context, symbol, orderID string) error {
 	b.unlockFunds(ord, base, quote)
 	delete(b.reserved, orderID)
 	ord.Status = domain.OrderCanceled
-	ord.UpdatedAt = time.Now()
+	ord.UpdatedAt = b.clk.Now()
 	b.orders[orderID] = ord
 	emitters := []func(){b.emitOrder(ord), b.emitBalances()}
 	b.mu.Unlock()
@@ -595,7 +604,7 @@ func (b *Broker) applyFillLocked(ord domain.Order, base, quote string, price dec
 	} else {
 		ord.Status = domain.OrderPartiallyFilled
 	}
-	ord.UpdatedAt = time.Now()
+	ord.UpdatedAt = b.clk.Now()
 
 	quoteQty := exec.Mul(fillQty)
 	var fee decimal.Decimal
@@ -625,7 +634,7 @@ func (b *Broker) applyFillLocked(ord domain.Order, base, quote string, price dec
 		QuoteQty:  quoteQty,
 		Fee:       fee,
 		FeeAsset:  feeAsset,
-		Timestamp: time.Now(),
+		Timestamp: b.clk.Now(),
 	}
 	b.trades = append(b.trades, t)
 	b.orders[ord.ID] = ord
