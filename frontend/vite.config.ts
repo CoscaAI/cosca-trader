@@ -34,6 +34,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       "/health": coreProxy(),
+      "/ticker": coreProxy(),
       "/events": coreProxy(),
       "/orders": coreProxy(),
       "/positions": coreProxy(),
