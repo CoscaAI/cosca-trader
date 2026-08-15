@@ -375,8 +375,11 @@ td.mono {
   padding: 16px 18px;
   box-shadow: var(--shadow-card);
   backdrop-filter: blur(10px);
-  transition: border-color 0.25s, transform 0.25s, box-shadow 0.25s;
-  animation: cardIn 0.35s ease both;
+  /* NUNCA animar/transicionar `transform` no card: o react-grid-layout v2
+     posiciona via transform inline. Transição/animação de transform sequestra
+     a posição (drag travado, cards amontoam no canto). Entrada só com fade. */
+  transition: border-color 0.25s, box-shadow 0.25s;
+  animation: cardIn 0.35s ease;
 }
 
 .card:hover {
@@ -384,8 +387,8 @@ td.mono {
 }
 
 @keyframes cardIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .card h2 {
