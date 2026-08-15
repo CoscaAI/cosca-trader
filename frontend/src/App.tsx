@@ -6,9 +6,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import GridLayout from "react-grid-layout";
 
-// O @types do react-grid-layout está defasado (não reconhece props). O
-// WidthProvider do /legacy era de outra versão e não media a largura real —
-// medimos NÓS MESMOS com ResizeObserver e passamos width explícito.
+// react-grid-layout v2 (2.x) trocou a API: `cols`/`rowHeight`/`margin`/
+// `containerPadding`/`isDraggable`/`isResizable`/`draggableHandle`/`useCSSTransforms`
+// viraram `gridConfig`/`dragConfig`/`resizeConfig`. O @types separado (v1) não
+// cobre a v2 — castamos para any e passamos as props novas corretamente.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const Grid = GridLayout as unknown as React.ComponentType<any>;
 
@@ -53,7 +54,7 @@ const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
 const LAYOUT_KEY = "cosca_trader_layout";
-const LAYOUT_VERSION = "v2"; // invalida layouts antigos (rowHeight mudou 34→22)
+const LAYOUT_VERSION = "v3"; // invalida layouts antigos (API v2 do grid — os antigos usavam a API v1 e ficavam quebrados)
 
 // Layout default do painel (grid de 12 colunas, linhas de 22px — mais
 // compacto e com resize proporcional). O Don pode arrastar e redimensionar
@@ -755,10 +756,9 @@ export default function App() {
     return () => ro.disconnect();
   }, []);
 
-  // Persiste o layout quando o Don reorganiza/redimensiona o painel.
-  // Nota: o @types do react-grid-layout tipa onLayoutChange como (layout) =>
-  // void com "Layout" sendo o ITEM — mas o runtime entrega o ARRAY completo.
-  // Usamos GridLayoutItem[] (o shape real) e alinhamos com as any na prop.
+  // Persiste o layout quando o Don reorganiza/redimensiona o painel. A v2
+  // entrega o ARRAY completo no onLayoutChange (layout), e só dispara quando o
+  // drag/resize TERMINA — mesma semântica do antigo onDragStop/onResizeStop.
   const onLayoutChange = useCallback((next: GridLayoutItem[]) => {
     setLayout(next);
     try {
@@ -958,21 +958,16 @@ export default function App() {
       </header>
 
       <main className="grid-main" ref={gridMainRef as React.RefObject<HTMLElement>}>
-        <Grid
-          className="layout"
-          layout={layout}
-          cols={12}
-          rowHeight={22}
-          width={gridWidth || undefined}
-          margin={[12, 12]}
-          containerPadding={[4, 4]}
-          draggableHandle=".card-drag"
-          onDragStop={onLayoutChange}
-          onResizeStop={onLayoutChange}
-          isResizable
-          isDraggable
-          useCSSTransforms
-        >
+        {gridWidth > 0 && (
+          <Grid
+            className="layout"
+            layout={layout}
+            width={gridWidth}
+            gridConfig={{ cols: 12, rowHeight: 22, margin: [12, 12], containerPadding: [4, 4] }}
+            dragConfig={{ enabled: true, handle: ".card-drag" }}
+            resizeConfig={{ enabled: true }}
+            onLayoutChange={onLayoutChange}
+          >
           <div key="chart" className="card chart-card">
             <div className="card-drag chart-head">
               <h2>
@@ -1064,7 +1059,8 @@ export default function App() {
             </div>
             <Timeline events={timeline} />
           </div>
-        </Grid>
+          </Grid>
+        )}
       </main>
     </div>
   );
