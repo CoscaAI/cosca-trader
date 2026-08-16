@@ -45,16 +45,18 @@ func NewDemoFeed(seed int64, symbol string, start float64) *DemoFeed {
 	}
 }
 
-// FastDemo acelera a cadência do feed (velas de 5s) para demonstrações da
-// estratégia (Fase 3D): o cruzamento de médias sinaliza em minutos, não em
-// horas. O random walk NÃO muda (mesmo seed = mesma sequência de preços) —
-// apenas o ritmo de entrega.
+// FastDemo acelera a cadência do feed (velas de 5s) e AUMENTA a volatilidade
+// (10× o default) para demonstrações da estratégia (Fase 3D): o cruzamento de
+// médias sinaliza em MINUTOS, não em horas. O seed não muda — a sequência de
+// choques é a mesma; só a magnitude (vol) e o ritmo de entrega sobem, para o
+// Don VER a máquina operar.
 func (d *DemoFeed) FastDemo() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.fast = true
 	d.interval = 5 * time.Second
 	d.tickStep = 250 * time.Millisecond
+	d.vol = 0.02 // 2% por tick — 10× o default, para o random walk cruzar as EMAs rápido
 }
 
 // Name devolve o identificador do feed.
