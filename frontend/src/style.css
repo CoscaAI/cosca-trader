@@ -865,6 +865,25 @@ tr:last-child td {
   white-space: nowrap;
 }
 
+/* ── copiloto IA (F6) — chat ───────────────────────────────────────────── */
+
+.chat { display: flex; flex-direction: column; height: 100%; gap: 8px; }
+.chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 2px; }
+.chat-msg { padding: 6px 10px; border-radius: 8px; font-size: 13px; line-height: 1.45; max-width: 92%; white-space: pre-wrap; }
+.chat-msg.you { align-self: flex-end; background: var(--on); color: #0b0f14; }
+.chat-msg.assistant { align-self: flex-start; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); }
+.chat-input { display: flex; gap: 6px; }
+.chat-input input {
+  flex: 1; padding: 8px 10px; border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.15); background: transparent; color: inherit; font-size: 13px;
+}
+.chat-input input:focus { outline: none; border-color: var(--on); }
+.chat-input button {
+  padding: 8px 14px; border-radius: 6px; border: none;
+  background: var(--on); color: #0b0f14; cursor: pointer; font-weight: 600; font-size: 13px;
+}
+.chat-input button:disabled { opacity: 0.5; cursor: default; }
+
 /* ── responsivo ────────────────────────────────────────────────────────── */
 
 @media (max-width: 1100px) {

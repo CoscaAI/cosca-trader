@@ -48,7 +48,7 @@ func newTestMux(t *testing.T, sec apiSecurity) *http.ServeMux {
 	}
 	e := engine.New(db)
 	e.Emit(event.Event{Type: event.SystemStarted, Source: "test"})
-	return newMux(e, nil, nil, nil, nil, nil, "0", sec, "observe")
+	return newMux(e, nil, nil, nil, nil, nil, nil, nil, "0", sec, "observe")
 }
 
 // doGET executa uma requisição GET com cabeçalhos opcionais.
@@ -179,7 +179,7 @@ func TestPositionsEndpointIncludesUnrealizedPnL(t *testing.T) {
 	omsEngine := oms.New(&fakeHTTPBroker{}, func(event.Event) error { return nil })
 	omsEngine.ApplyTrade(domain.Trade{ID: "t1", Symbol: "BTCUSDT", Exchange: "binance", Side: domain.SideBuy, Price: d("100"), Quantity: d("2"), Timestamp: time.Now()})
 	omsEngine.ApplyMarkPrice("BTCUSDT", "binance", d("120"))
-	mux := newMux(e, omsEngine, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	mux := newMux(e, omsEngine, nil, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
 	rec := doGET(mux, "/positions", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/positions deveria ser 200, veio %d", rec.Code)
@@ -213,7 +213,7 @@ func TestPaperEndpointWithoutPaperMode(t *testing.T) {
 	db, _ := store.Open(t.TempDir() + "/t.db")
 	defer db.Close()
 	e := engine.New(db)
-	mux := newMux(e, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	mux := newMux(e, nil, nil, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
 	rec := doGET(mux, "/paper", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("/paper sem modo paper deveria ser 503, veio %d", rec.Code)
@@ -226,7 +226,7 @@ func TestPaperEndpointWithPaperMode(t *testing.T) {
 	e := engine.New(db)
 	pb := paper.New()
 	pb.SetPrice("BTCUSDT", decimal.NewFromFloat(60000))
-	mux := newMux(e, nil, pb, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
+	mux := newMux(e, nil, pb, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
 	rec := doGET(mux, "/paper", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/paper com modo paper deveria ser 200, veio %d", rec.Code)
@@ -269,7 +269,7 @@ func newPaperOMSMux(t *testing.T) (*http.ServeMux, *oms.OMS, *paper.Broker) {
 	pb := paper.New()
 	pb.SetPrice("BTCUSDT", decimal.NewFromFloat(60000))
 	o := oms.New(pb, func(event.Event) error { return nil })
-	mux := newMux(e, o, pb, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
+	mux := newMux(e, o, pb, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
 	return mux, o, pb
 }
 
@@ -277,7 +277,7 @@ func TestBacktestEndpointOffline(t *testing.T) {
 	db, _ := store.Open(t.TempDir() + "/t.db")
 	defer db.Close()
 	e := engine.New(db)
-	mux := newMux(e, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
+	mux := newMux(e, nil, nil, nil, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "observe")
 	rec := doGET(mux, "/backtest?symbol=BTCUSDT", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/backtest deveria ser 200, veio %d", rec.Code)
@@ -299,7 +299,7 @@ func TestRiskEndpoint(t *testing.T) {
 	defer db.Close()
 	e := engine.New(db)
 	rm := risk.New(risk.Config{EquityProvider: func() decimal.Decimal { return decimal.NewFromInt(10000) }})
-	mux := newMux(e, nil, nil, rm, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
+	mux := newMux(e, nil, nil, rm, nil, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "paper")
 	rec := doGET(mux, "/risk", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/risk deveria ser 200, veio %d", rec.Code)
@@ -402,7 +402,7 @@ func TestConvergenceEndpointWithMonitor(t *testing.T) {
 	e := engine.New(db)
 	tracker := strategy.NewPredictionTracker("ema-cross", 3, 100)
 	conv := strategy.NewConvergence(0.5, tracker, strategy.ConvergenceConfig{})
-	mux := newMux(e, nil, nil, nil, conv, nil, "0", apiSecurity{token: "segredo"}, "shadow")
+	mux := newMux(e, nil, nil, nil, conv, nil, nil, nil, "0", apiSecurity{token: "segredo"}, "shadow")
 	rec := doGET(mux, "/convergence", map[string]string{"Authorization": "Bearer segredo"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/convergence deveria ser 200, veio %d", rec.Code)

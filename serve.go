@@ -16,6 +16,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/CoscaAI/cosca-trader/internal/cognitive"
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
@@ -34,8 +35,8 @@ type apiSecurity struct {
 	allowedOrigins []string
 }
 
-func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, port string, sec apiSecurity, mode string) {
-	mux := newMux(e, o, pb, rm, conv, radar, port, sec, mode)
+func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, assistant *cognitive.Assistant, snapshot func() cognitive.Snapshot, port string, sec apiSecurity, mode string) {
+	mux := newMux(e, o, pb, rm, conv, radar, assistant, snapshot, port, sec, mode)
 	log.Printf("COSCA TRADER — core no ar em 127.0.0.1:%s (auth fail-closed: %v)", port, sec.token != "")
 	log.Fatal(http.ListenAndServe("127.0.0.1:"+port, mux))
 }
@@ -43,7 +44,7 @@ func serve(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, con
 // newMux monta o roteador HTTP do core — extraído para ser testável (httptest)
 // sem subir o listener. /health é público; todos os demais endpoints passam
 // pela política de segurança (origem + token).
-func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, port string, sec apiSecurity, mode string) *http.ServeMux {
+func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, conv *strategy.ConvergenceMonitor, radar *marketindex.Client, assistant *cognitive.Assistant, snapshot func() cognitive.Snapshot, port string, sec apiSecurity, mode string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// /health — estado do core. Público (liveness, sem dados sensíveis).
@@ -277,6 +278,36 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 			"fetched_at": snap.FetchedAt,
 			"divergence": sig,
 		})
+	}))
+
+	// /chat — o copiloto cognitivo (F6): o Don pergunta, o LLM responde sobre
+	// o estado vivo do sistema. Sem provider (off), responde determinístico.
+	mux.HandleFunc("/chat", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Message string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Message == "" {
+			http.Error(w, "corpo inválido (esperado {\"message\": \"...\"})", http.StatusBadRequest)
+			return
+		}
+		if assistant == nil {
+			http.Error(w, "copiloto não inicializado", http.StatusServiceUnavailable)
+			return
+		}
+		reply, err := assistant.Ask(r.Context(), snapshot(), req.Message)
+		if err != nil {
+			http.Error(w, "assistente: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		provider := "off"
+		if assistant.Provider() != nil {
+			provider = assistant.Provider().Name()
+		}
+		writeJSON(w, map[string]any{"reply": reply, "provider": provider})
 	}))
 
 	// /candles — histórico OHLCV para o gráfico do painel. Busca da Binance

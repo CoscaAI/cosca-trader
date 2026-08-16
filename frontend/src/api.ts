@@ -107,6 +107,16 @@ export class CoreClient {
     return (await r.json()) as Order;
   }
 
+  async chat(message: string): Promise<{ reply: string; provider: string }> {
+    const r = await fetch("/chat", {
+      method: "POST",
+      headers: this.authHeaders(),
+      body: JSON.stringify({ message }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return (await r.json()) as { reply: string; provider: string };
+  }
+
   private async get<T>(path: string): Promise<T> {
     const r = await fetch(path, { headers: this.authHeaders() });
     if (r.status === 503) throw new UnavailableError(503, path);

@@ -54,7 +54,7 @@ const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
 const LAYOUT_KEY = "cosca_trader_layout";
-const LAYOUT_VERSION = "v4"; // invalida layouts antigos (minH reajustado para caber o conteúdo — os anteriores cortavam)
+const LAYOUT_VERSION = "0.1.0"; // semver: bump (0.1.1, 0.1.2...) invalida layouts salvos antigos no browser — controle fino de quando o painel reorganiza
 
 // Layout default do painel (grid de 12 colunas, linhas de 22px — mais
 // compacto e com resize proporcional). O Don pode arrastar e redimensionar
@@ -68,6 +68,7 @@ const DEFAULT_LAYOUT: GridLayoutItem[] = [
   { i: "markets", x: 4, y: 12, w: 4, h: 10, minW: 3, minH: 8 },
   { i: "convergence", x: 8, y: 12, w: 4, h: 7, minW: 3, minH: 5 },
   { i: "paper", x: 8, y: 19, w: 4, h: 5, minW: 3, minH: 4 },
+  { i: "chat", x: 0, y: 29, w: 8, h: 8, minW: 4, minH: 5 },
   { i: "risk", x: 0, y: 23, w: 4, h: 6, minW: 3, minH: 5 },
   { i: "orders", x: 4, y: 22, w: 4, h: 11, minW: 3, minH: 9 },
   { i: "timeline", x: 8, y: 24, w: 4, h: 7, minW: 3, minH: 5 },
@@ -602,6 +603,50 @@ function ConvergenceCard({ conv }: { conv: ConvergenceState | null }) {
   );
 }
 
+function ChatCard({ client }: { client: CoreClient }) {
+  const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const send = async () => {
+    const q = input.trim();
+    if (!q || busy) return;
+    setInput("");
+    setMessages((m) => [...m, { role: "you", content: q }]);
+    setBusy(true);
+    try {
+      const r = await client.chat(q);
+      setMessages((m) => [...m, { role: "assistant", content: r.reply }]);
+    } catch (e) {
+      setMessages((m) => [...m, { role: "assistant", content: "erro: " + (e as Error).message }]);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="chat">
+      <div className="chat-log">
+        {messages.length === 0 && (
+          <p className="empty">Pergunte ao copiloto — ex.: "como está o risco?"</p>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`chat-msg ${m.role}`}>{m.content}</div>
+        ))}
+      </div>
+      <div className="chat-input">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+          placeholder="Pergunte ao copiloto…"
+        />
+        <button onClick={send} disabled={busy}>{busy ? "…" : "Enviar"}</button>
+      </div>
+    </div>
+  );
+}
+
 function OrdersPanel({
   client,
   orders,
@@ -1075,6 +1120,13 @@ export default function App() {
               <h2>Convergência — laboratório vivo</h2>
             </div>
             <ConvergenceCard conv={convergence} />
+          </div>
+
+          <div key="chat" className="card chat-card">
+            <div className="card-drag">
+              <h2>Copiloto IA</h2>
+            </div>
+            <ChatCard client={client} />
           </div>
 
           <div key="orders" className="card orders-card">

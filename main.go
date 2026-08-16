@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/CoscaAI/cosca-trader/internal/cognitive"
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/event"
@@ -545,7 +546,43 @@ func main() {
 		}()
 	}
 
-	serve(e, omsEngine, paperBroker, riskMgr, shadowMonitor, macroRadar, *port, apiSecurity{
+	// F6 — copiloto cognitivo: LLM plugável (ollama local / openai nuvem / off).
+	// O motor continua Go puro; a IA só conversa e raciocina. Sem provider,
+	// responde determinístico — nunca trava a operação por falta de LLM.
+	assistant := cognitive.NewAssistant(cognitive.New(cognitiveCfg()))
+	snapshot := func() cognitive.Snapshot {
+		snap := cognitive.Snapshot{
+			Mode:          mode,
+			Strategy:      "desligada",
+			Equity:        "n/d",
+			Drawdown:      "n/d",
+			Positions:     "nenhuma",
+			MacroRegime:   macroRegime(),
+			RecentSignals: "nenhum",
+		}
+		if strat != nil {
+			snap.Strategy = strat.Name()
+		}
+		if riskMgr != nil {
+			st := riskMgr.State()
+			snap.Equity = st.Equity.StringFixed(2)
+			snap.Drawdown = st.DrawdownPct.StringFixed(2) + "%"
+			snap.Paused = st.TradingHalted
+		}
+		if omsEngine != nil {
+			positions := omsEngine.Positions()
+			if len(positions) > 0 {
+				parts := make([]string, 0, len(positions))
+				for _, p := range positions {
+					parts = append(parts, p.Symbol+" "+string(p.Side)+" qty="+p.Quantity.String())
+				}
+				snap.Positions = strings.Join(parts, "; ")
+			}
+		}
+		return snap
+	}
+
+	serve(e, omsEngine, paperBroker, riskMgr, shadowMonitor, macroRadar, assistant, snapshot, *port, apiSecurity{
 		token:          token,
 		allowedOrigins: allowedOrigins,
 	}, mode)
@@ -691,7 +728,7 @@ func runShadow(symbol, interval, strategyName, port string, demo bool, e *engine
 	*shadowMonitor = monitor
 	sec := apiSecurity{token: os.Getenv("COSCA_TRADER_TOKEN")}
 	go func() {
-		serve(e, nil, nil, nil, monitor, nil, port, sec, "shadow")
+		serve(e, nil, nil, nil, monitor, nil, nil, nil, port, sec, "shadow")
 	}()
 
 	if err := md.Start(ctx); err != nil {
@@ -1033,6 +1070,26 @@ func envInt(name string, def int) int {
 		return def
 	}
 	return v
+}
+
+// cognitiveCfg monta a configuração do copiloto (F6) a partir do ambiente.
+// COSCA_TRADER_LLM_PROVIDER: off (default) | ollama | openai.
+// COSCA_TRADER_LLM_MODEL: modelo (ollama default qwen2.5-coder:7b;
+// openai default gpt-4o-mini). OPENAI_API_KEY para o provider openai.
+func cognitiveCfg() cognitive.Config {
+	kind := strings.ToLower(strings.TrimSpace(os.Getenv("COSCA_TRADER_LLM_PROVIDER")))
+	cfg := cognitive.Config{Kind: kind}
+	switch kind {
+	case "ollama":
+		cfg.Model = os.Getenv("COSCA_TRADER_LLM_MODEL") // vazio = default do provider
+	case "openai":
+		cfg.Model = os.Getenv("COSCA_TRADER_LLM_MODEL")
+		if cfg.Model == "" {
+			cfg.Model = "gpt-4o-mini"
+		}
+		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
+	}
+	return cfg
 }
 
 // riskPerTradePct lê o risco por trade para o sizing (F4B). Default: 0
