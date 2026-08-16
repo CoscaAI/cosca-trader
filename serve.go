@@ -17,10 +17,12 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/CoscaAI/cosca-trader/internal/cognitive"
+	"github.com/CoscaAI/cosca-trader/internal/diagnosis"
 	"github.com/CoscaAI/cosca-trader/internal/domain"
 	"github.com/CoscaAI/cosca-trader/internal/engine"
 	"github.com/CoscaAI/cosca-trader/internal/exchange"
 	"github.com/CoscaAI/cosca-trader/internal/exchange/binance"
+	"github.com/CoscaAI/cosca-trader/internal/market"
 	"github.com/CoscaAI/cosca-trader/internal/marketindex"
 	"github.com/CoscaAI/cosca-trader/internal/oms"
 	"github.com/CoscaAI/cosca-trader/internal/paper"
@@ -304,10 +306,101 @@ func newMux(e *engine.Engine, o *oms.OMS, pb *paper.Broker, rm *risk.Manager, co
 			return
 		}
 		provider := "off"
-		if assistant.Provider() != nil {
-			provider = assistant.Provider().Name()
+		model := "off"
+		if m := assistant.Model(); m != nil {
+			provider = m.Provider()
+			model = m.ID()
 		}
-		writeJSON(w, map[string]any{"reply": reply, "provider": provider})
+		writeJSON(w, map[string]any{"reply": reply, "provider": provider, "model": model})
+	}))
+
+	// /models — lista os modelos registrados (header: seletor de provider/modelo)
+	// com capacidade e latência medida. Query: ?measure=1 para medir latência.
+	mux.HandleFunc("/models", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if assistant.Registry() == nil {
+			http.Error(w, "registry não inicializado", http.StatusServiceUnavailable)
+			return
+		}
+		measure := r.URL.Query().Get("measure") == "1"
+		infos := assistant.Registry().ListModels(r.Context(), measure)
+		active := assistant.Registry().Active()
+		writeJSON(w, map[string]any{"models": infos, "active": active, "providers": assistant.Registry().Providers()})
+	}))
+
+	// /models/active — troca o modelo ativo (header: seletor). Body: {"id": "ollama:qwen2.5-coder:14b"}
+	mux.HandleFunc("/models/active", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "método não permitido", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			http.Error(w, "corpo inválido (esperado {\"id\": \"provider:modelo\"})", http.StatusBadRequest)
+			return
+		}
+		if assistant.Registry() == nil {
+			http.Error(w, "registry não inicializado", http.StatusServiceUnavailable)
+			return
+		}
+		m, err := assistant.Registry().Resolve(req.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		assistant.SetModel(m)
+		_ = assistant.Registry().SetActive(req.ID)
+		writeJSON(w, map[string]any{"active": req.ID, "provider": m.Provider(), "model": m.ID()})
+	}))
+
+	// /diagnosis — o laudo completo de um ativo: favorável/desfavorável, ganho
+	// esperado, confiança e estatística completa por estratégia (backtest real
+	// + benchmark buy-and-hold). Query: ?symbol=BTCUSDT&interval=1h&bars=200
+	mux.HandleFunc("/diagnosis", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		sym := r.URL.Query().Get("symbol")
+		if sym == "" {
+			sym = "BTCUSDT"
+		}
+		iv := r.URL.Query().Get("interval")
+		if iv == "" {
+			iv = "1h"
+		}
+		bars := 200
+		if b := r.URL.Query().Get("bars"); b != "" {
+			if n, err := strconv.Atoi(b); err == nil && n > 0 && n <= 500 {
+				bars = n
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		candles, err := binance.New().Klines(ctx, sym, iv, bars, bars)
+		if err != nil || len(candles) == 0 {
+			writeJSON(w, map[string]any{"symbol": sym, "favorable": false, "summary": "sem dados de mercado (Binance indisponível)"})
+			return
+		}
+		// regime macro (se o radar estiver vivo)
+		regime := "desconhecido"
+		if radar != nil {
+			if snap, ferr := radar.Fetch(ctx); ferr == nil {
+				regime = snap.Regime
+			}
+		}
+		writeJSON(w, diagnosis.Analyze(sym, regime, candles))
+	}))
+
+	// /coins — a lista de ativos operáveis (sidebar à direita, estilo TradingView):
+	// sigla, nome, variação 24h, volume e market cap. Filtrado por volume diário
+	// consistente + market cap suficiente.
+	mux.HandleFunc("/coins", sec.secure(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		coins, err := market.FetchCoins(ctx, binance.New())
+		if err != nil {
+			http.Error(w, "moedas: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"coins": coins, "count": len(coins)})
 	}))
 
 	// /candles — histórico OHLCV para o gráfico do painel. Busca da Binance

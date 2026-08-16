@@ -21,27 +21,40 @@ type Snapshot struct {
 }
 
 // Assistant é o copiloto cognitivo: lê o snapshot, monta o contexto e pergunta
-// ao provider. Sem provider (off), devolve uma resposta determinística — nunca
+// ao modelo. Sem modelo (off), devolve uma resposta determinística — nunca
 // trava a operação por falta de LLM.
 type Assistant struct {
-	provider Provider
+	model    Model
+	registry *Registry
 }
 
-// NewAssistant cria o copiloto com um provider (nil = off).
-func NewAssistant(p Provider) *Assistant {
-	return &Assistant{provider: p}
+// NewAssistant cria o copiloto com um modelo (nil = off).
+func NewAssistant(m Model) *Assistant {
+	return &Assistant{model: m}
 }
 
-// Provider devolve o provider ativo (nil = off) — para o /chat reportar qual
+// WithRegistry anexa o registry (para o endpoint /models do header).
+func (a *Assistant) WithRegistry(r *Registry) *Assistant {
+	a.registry = r
+	return a
+}
+
+// Registry devolve o registry anexado (nil se não houver).
+func (a *Assistant) Registry() *Registry { return a.registry }
+
+// Model devolve o modelo ativo (nil = off) — para o /chat reportar qual
 // modelo está respondendo.
-func (a *Assistant) Provider() Provider { return a.provider }
+func (a *Assistant) Model() Model { return a.model }
+
+// SetModel troca o modelo ativo (nil = off) — o header usa para trocar.
+func (a *Assistant) SetModel(m Model) { a.model = m }
 
 // Ask responde a pergunta do Don sobre o estado corrente.
 func (a *Assistant) Ask(ctx context.Context, snap Snapshot, question string) (string, error) {
-	if a.provider == nil {
+	if a.model == nil {
 		return offlineReply(snap, question), nil
 	}
-	return a.provider.Complete(ctx, buildSystemPrompt(snap), question)
+	return a.model.Generate(ctx, buildSystemPrompt(snap), question)
 }
 
 // buildSystemPrompt monta o contexto do copiloto — identidade + estado vivo.
@@ -85,6 +98,6 @@ func offlineReply(s Snapshot, question string) string {
 	case strings.Contains(q, "estrat") || strings.Contains(q, "sinal"):
 		return fmt.Sprintf("Estratégia ativa: %s. Últimos sinais: %s", s.Strategy, s.RecentSignals)
 	default:
-		return fmt.Sprintf("Copiloto em modo OFF (nenhum LLM configurado). Para ligar, defina COSCA_TRADER_LLM_PROVIDER=ollama (local) ou openai. Estado atual: modo %s, estratégia %s, equity %s, drawdown %s, regime %s.", s.Mode, s.Strategy, s.Equity, s.Drawdown, s.MacroRegime)
+		return fmt.Sprintf("Copiloto em modo OFF (nenhum LLM configurado). Para ligar, escolha um provider e modelo no header. Estado atual: modo %s, estratégia %s, equity %s, drawdown %s, regime %s.", s.Mode, s.Strategy, s.Equity, s.Drawdown, s.MacroRegime)
 	}
 }

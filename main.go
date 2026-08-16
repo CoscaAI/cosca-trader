@@ -546,10 +546,11 @@ func main() {
 		}()
 	}
 
-	// F6 — copiloto cognitivo: LLM plugável (ollama local / openai nuvem / off).
-	// O motor continua Go puro; a IA só conversa e raciocina. Sem provider,
-	// responde determinístico — nunca trava a operação por falta de LLM.
-	assistant := cognitive.NewAssistant(cognitive.New(cognitiveCfg()))
+	// F6+ — copiloto cognitivo com registry (padrão Vercel): provider/modelo
+	// plugável. O motor continua Go puro; a IA só conversa e raciocina. Sem
+	// modelo, responde determinístico — nunca trava a operação por falta de LLM.
+	registry, activeModel := buildRegistry()
+	assistant := cognitive.NewAssistant(activeModel).WithRegistry(registry)
 	snapshot := func() cognitive.Snapshot {
 		snap := cognitive.Snapshot{
 			Mode:          mode,
@@ -1072,24 +1073,59 @@ func envInt(name string, def int) int {
 	return v
 }
 
-// cognitiveCfg monta a configuração do copiloto (F6) a partir do ambiente.
-// COSCA_TRADER_LLM_PROVIDER: off (default) | ollama | openai.
-// COSCA_TRADER_LLM_MODEL: modelo (ollama default qwen2.5-coder:7b;
-// openai default gpt-4o-mini). OPENAI_API_KEY para o provider openai.
-func cognitiveCfg() cognitive.Config {
-	kind := strings.ToLower(strings.TrimSpace(os.Getenv("COSCA_TRADER_LLM_PROVIDER")))
-	cfg := cognitive.Config{Kind: kind}
-	switch kind {
-	case "ollama":
-		cfg.Model = os.Getenv("COSCA_TRADER_LLM_MODEL") // vazio = default do provider
-	case "openai":
-		cfg.Model = os.Getenv("COSCA_TRADER_LLM_MODEL")
-		if cfg.Model == "" {
-			cfg.Model = "gpt-4o-mini"
-		}
-		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
+// buildRegistry monta o registry de providers (padrão Vercel) e resolve o
+// modelo ativo do ambiente.
+//
+// Providers:
+//   - ollama (sempre): local, grátis, OpenAI-compatível em {OLLAMA_HOST}/v1
+//   - openai (se OPENAI_API_KEY): nuvem
+//   - deepseek (se DEEPSEEK_API_KEY): nuvem
+//
+// Modelo ativo:
+//   - COSCA_TRADER_LLM_PROVIDER: off (default) | ollama | openai | deepseek
+//   - COSCA_TRADER_LLM_MODEL: modelo (default por provider)
+func buildRegistry() (*cognitive.Registry, cognitive.Model) {
+	r := cognitive.NewRegistry()
+
+	// ollama sempre disponível (local, grátis)
+	ollamaBase := strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
+	if ollamaBase == "" {
+		ollamaBase = "http://127.0.0.1:11434"
 	}
-	return cfg
+	r.Register(cognitive.NewOpenAICompatible("ollama", ollamaBase+"/v1", ""))
+
+	// openai / deepseek só com chave
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		r.Register(cognitive.NewOpenAICompatible("openai", "https://api.openai.com/v1", key))
+	}
+	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
+		r.Register(cognitive.NewOpenAICompatible("deepseek", "https://api.deepseek.com/v1", key))
+	}
+
+	// modelo ativo do ambiente
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("COSCA_TRADER_LLM_PROVIDER")))
+	if provider == "" || provider == "off" {
+		return r, nil // copiloto off (determinístico)
+	}
+	modelID := os.Getenv("COSCA_TRADER_LLM_MODEL")
+	if modelID == "" {
+		switch provider {
+		case "openai":
+			modelID = "gpt-4o-mini"
+		case "deepseek":
+			modelID = "deepseek-chat"
+		default:
+			modelID = "qwen2.5-coder:7b"
+		}
+	}
+	full := provider + ":" + modelID
+	m, err := r.Resolve(full)
+	if err != nil {
+		log.Printf("⚠ modelo ativo inválido (%s): %v — copiloto off", full, err)
+		return r, nil
+	}
+	_ = r.SetActive(full)
+	return r, m
 }
 
 // riskPerTradePct lê o risco por trade para o sizing (F4B). Default: 0
