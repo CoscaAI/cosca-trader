@@ -58,6 +58,8 @@ func main() {
 	scanFlag := flag.Bool("scan", false, "Fase 5: SCANNER — avalia TODAS as estratégias com dados reais e ranqueia por score científico")
 	scanSymbols := flag.String("scan-symbols", "BTCUSDT", "símbolos do scanner separados por vírgula (ex: BTCUSDT,ETHUSDT,SOLUSDT)")
 	scanIntervals := flag.String("scan-intervals", "1h", "intervalos do scanner separados por vírgula (ex: 1h,4h,1d)")
+	scanMCSims := flag.Int("mc-sims", 1000, "simulações Monte Carlo no scanner (mais = P(perder) mais preciso)")
+	scanSigTrials := flag.Int("sig-trials", 1000, "trials de bootstrap na significância (mais = p-value mais preciso)")
 		marketsFlag := flag.Bool("markets", false, "proteção macro: monitora os mercados GLOBAIS (S&P 500, NASDAQ, VIX, ouro, dólar) e mostra o regime risk-on/risk-off")
 	macroFlag := flag.Bool("macro", false, "MONITOR CONTÍNUO de divergência macro: radar global + cripto, detecta S&P caiu/BTC não reagiu e sinaliza entrada seguindo a tendência — com rate limit e proteção por falta de dados")
 	shadowFlag := flag.Bool("shadow", false, "Fase 5: MODO LABORATÓRIO VIVO — observa o mercado REAL (sem chave, sem dinheiro), registra previsões da estratégia, mede CONVERGÊNCIA com a realidade e reajusta sozinho quando o regime muda")
@@ -149,7 +151,7 @@ func main() {
 	// avalia TODAS as estratégias registradas, rankeando por score e aplicando
 	// o portão da casa. Responde "qual é a melhor estratégia AGORA?".
 	if *scanFlag {
-		runScanMulti(*scanSymbols, *scanIntervals, *fetchBars)
+		runScanMulti(*scanSymbols, *scanIntervals, *fetchBars, *scanMCSims, *scanSigTrials)
 		return
 	}
 
@@ -792,13 +794,13 @@ func runMacroMonitor(symbol, interval string, bars int) {
 // SCANNER: todas as estratégias, mesmo histórico, ranking por score científico
 // e o portão da casa. O resultado é "qual estratégia merece operar AGORA".
 func runScan(symbol, interval string, bars int) {
-	runScanMulti(symbol, interval, bars)
+	runScanMulti(symbol, interval, bars, 1000, 1000)
 }
 
 // runScanMulti é o SCANNER em escala (a testing farm do Superalgos): varre
 // SÍMBOLOS × INTERVALOS × ESTRATÉGIAS e devolve o ranking GLOBAL por score —
 // a caça à estratégia que passa no portão em qualquer ativo/regime.
-func runScanMulti(symbolsCSV, intervalsCSV string, bars int) {
+func runScanMulti(symbolsCSV, intervalsCSV string, bars, mcSims, sigTrials int) {
 	symbols := splitCSV(symbolsCSV, "BTCUSDT")
 	intervals := splitCSV(intervalsCSV, "1h")
 	if len(symbols) == 0 || len(intervals) == 0 {
@@ -830,7 +832,7 @@ func runScanMulti(symbolsCSV, intervalsCSV string, bars int) {
 				continue
 			}
 			res := strategy.Scan(candles, decimal.NewFromInt(10000), decimal.NewFromFloat(0.001),
-				gate, 1000, 1000, paperSeed())
+				gate, mcSims, sigTrials, paperSeed())
 			log.Printf("═══ %s %s (%d velas %s → %s) ═══", sym, iv, res.Periods,
 				candles[0].OpenTime.Format("2006-01-02"), candles[len(candles)-1].OpenTime.Format("2006-01-02"))
 			for _, s := range res.Strategies {
