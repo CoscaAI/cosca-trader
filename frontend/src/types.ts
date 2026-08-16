@@ -274,3 +274,14 @@ export type ConvergenceState = {
   readjustments: number;
   last_reason: string;
 };
+
+// Coin — um ativo operável no sidebar (lista estilo TradingView).
+export type Coin = {
+  symbol: string; // "BTCUSDT"
+  base: string; // "BTC"
+  name: string; // "Bitcoin"
+  price: number;
+  change_24h: number; // % variação 24h
+  volume_24h: number; // volume 24h em USDT
+  market_cap: number; // market cap em USD
+};

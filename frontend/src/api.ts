@@ -6,6 +6,7 @@ import type {
   BacktestReport,
   Balance,
   CandlePayload,
+  Coin,
   ConvergenceState,
   Health,
   MarketsSnapshot,
@@ -115,6 +116,14 @@ export class CoreClient {
     });
     if (!r.ok) throw new Error(await r.text());
     return (await r.json()) as { reply: string; provider: string };
+  }
+
+  // coins lista os ativos operáveis (sidebar estilo TradingView).
+  async coins(): Promise<Coin[]> {
+    const r = await fetch("/coins", { headers: this.authHeaders() });
+    if (!r.ok) throw new Error(`/coins ${r.status}`);
+    const d = (await r.json()) as { coins: Coin[] };
+    return d.coins ?? [];
   }
 
   private async get<T>(path: string): Promise<T> {

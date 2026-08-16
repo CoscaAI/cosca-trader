@@ -26,6 +26,17 @@
   --mono: "JetBrains Mono", "SFMono-Regular", "Cascadia Code", Consolas, monospace;
   --radius: 14px;
   --radius-sm: 9px;
+  /* Escala de raio completa (padrão shadcn: relativa ao --radius) */
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  /* Foregrounds semânticos (cor de contraste sobre cada superfície) */
+  --accent-foreground: #04120c;
+  --muted-foreground: #9aa7b8;
+  --destructive: #f87171;
+  --destructive-foreground: #1a0707;
+  /* Anel de foco (acessibilidade — estados :focus-visible) */
+  --ring: rgba(46, 230, 168, 0.5);
   --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
                  0 12px 40px rgba(0, 0, 0, 0.45);
   --shadow-glow: 0 0 0 1px var(--accent-glow), 0 0 24px var(--accent-glow);
@@ -350,6 +361,14 @@ td.mono {
 
 .card-drag h2 {
   margin-bottom: 0;
+}
+
+/* ícones lucide nos cabeçalhos dos cards (padrão do projeto) */
+.card-drag h2 svg {
+  margin-right: 7px;
+  vertical-align: -2px;
+  flex-shrink: 0;
+  color: var(--accent-dim);
 }
 
 /* botão de restaurar layout */
@@ -894,4 +913,138 @@ tr:last-child td {
 @media (max-width: 700px) {
   .topbar { flex-direction: column; align-items: stretch; }
   .top-right { justify-content: space-between; }
+}
+
+/* ── sidebar de ativos (estilo TradingView, mais completo) ──────────────── */
+
+.body-row {
+  display: flex;
+  flex: 1;
+  min-height: 0; /* permite scroll interno */
+}
+
+.coin-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  background: rgba(8, 12, 20, 0.55);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.coin-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: inherit;
+  z-index: 2;
+}
+
+.coin-sidebar-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.coin-sidebar-count {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--border);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--mono);
+}
+
+.coin-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.coin-empty {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.coin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+  gap: 8px;
+}
+
+.coin-row:hover {
+  background: rgba(46, 230, 168, 0.06);
+}
+
+.coin-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.coin-sigla {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+
+.coin-nome {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+.coin-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+}
+
+.coin-price {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+.coin-chg {
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--mono);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.coin-chg.up {
+  color: var(--accent);
+}
+
+.coin-chg.down {
+  color: var(--off);
+}
+
+@media (max-width: 900px) {
+  .coin-sidebar { display: none; } /* no mobile, o sidebar some (o grid ocupa tudo) */
 }

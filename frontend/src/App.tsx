@@ -34,6 +34,21 @@ import {
 } from "lightweight-charts";
 
 import { CoreClient, streamEvents, UnavailableError } from "./api";
+import CoinsSidebar from "./CoinsSidebar";
+import {
+  Activity,
+  ArrowDownRight,
+  ArrowUpRight,
+  Bot,
+  Brain,
+  FlaskConical,
+  Gem,
+  Globe,
+  LayoutGrid,
+  RotateCcw,
+  ShieldAlert,
+  Wallet,
+} from "lucide-react";
 import type {
   BacktestReport,
   Balance,
@@ -49,11 +64,11 @@ import type {
   StreamEvent,
   TickPayload,
 } from "./types";
+import { Storage, StorageKeys } from "./shared/storage";
+import { cn } from "./shared/cn";
 
-const TOKEN_KEY = "cosca_trader_token";
 const TIMELINE_MAX = 40;
 const CANDLE_MAX = 500;
-const LAYOUT_KEY = "cosca_trader_layout";
 const LAYOUT_VERSION = "0.1.0"; // semver: bump (0.1.1, 0.1.2...) invalida layouts salvos antigos no browser — controle fino de quando o painel reorganiza
 
 // Layout default do painel (grid de 12 colunas, linhas de 22px — mais
@@ -79,11 +94,8 @@ const DEFAULT_LAYOUT: GridLayoutItem[] = [
 // tela.
 function loadLayout(): GridLayoutItem[] {
   try {
-    const raw = localStorage.getItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`);
-    if (raw) {
-      const parsed = JSON.parse(raw) as GridLayoutItem[];
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
+    const parsed = Storage.get<GridLayoutItem[]>(StorageKeys.layout, LAYOUT_VERSION);
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
   } catch {
     /* layout corrompido → default */
   }
@@ -796,7 +808,7 @@ export default function App() {
   const { health, healthErr } = useHealth();
   const btcPrice = useTicker("BTCUSDT");
   const [token, setToken] = useState<string>(
-    () => localStorage.getItem(TOKEN_KEY) ?? "",
+    () => Storage.get<string>(StorageKeys.token) ?? "",
   );
   const [positions, setPositions] = useState<Position[]>([]);
   const [balances, setBalances] = useState<Balance[]>([]);
@@ -834,7 +846,7 @@ export default function App() {
   const onLayoutChange = useCallback((next: GridLayoutItem[]) => {
     setLayout(next);
     try {
-      localStorage.setItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`, JSON.stringify(next));
+      Storage.set(StorageKeys.layout, next, LAYOUT_VERSION);
     } catch {
       /* storage cheio — layout só em memória */
     }
@@ -843,7 +855,7 @@ export default function App() {
   const resetLayout = useCallback(() => {
     setLayout(DEFAULT_LAYOUT);
     try {
-      localStorage.removeItem(`${LAYOUT_KEY}:${LAYOUT_VERSION}`);
+      Storage.remove(StorageKeys.layout, LAYOUT_VERSION);
     } catch {
       /* */
     }
@@ -858,7 +870,7 @@ export default function App() {
 
   const onTokenChange = (v: string) => {
     setToken(v);
-    localStorage.setItem(TOKEN_KEY, v);
+    Storage.set(StorageKeys.token, v);
   };
 
   // refresh: carrega posições/saldos/ordens/paper do core
@@ -1005,7 +1017,9 @@ export default function App() {
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <span className="logo">◆</span>
+          <span className="logo">
+            <Gem size={20} strokeWidth={1.8} />
+          </span>
           <h1>COSCA&nbsp;TRADER</h1>
           <span className="tag">F3 — painel de trading</span>
           <ModeBadge mode={health?.mode} hasToken={token !== ""} />
@@ -1023,16 +1037,17 @@ export default function App() {
             onChange={(e) => onTokenChange(e.target.value)}
             autoComplete="off"
           />
-          <div className={`status ${health?.ok ? "ok" : "off"}`}>
+          <div className={cn("status", health?.ok ? "ok" : "off")}>
             <span className="dot" />
             {health?.ok ? "core online" : healthErr ?? "conectando…"}
           </div>
           <button className="btn reset-layout" onClick={resetLayout} title="restaurar layout">
-            ⟲ layout
+            <RotateCcw size={14} /> layout
           </button>
         </div>
       </header>
 
+      <div className="body-row">
       <main className="grid-main" ref={gridMainRef as React.RefObject<HTMLElement>}>
         {gridWidth > 0 && (
           <Grid
@@ -1061,7 +1076,7 @@ export default function App() {
                   {TF_OPTIONS.map((tf) => (
                     <button
                       key={tf}
-                      className={`tf-btn ${timeframe === tf ? "active" : ""}`}
+                      className={cn("tf-btn", timeframe === tf && "active")}
                       onClick={() => setTimeframe(tf)}
                     >
                       {tf}
@@ -1075,76 +1090,78 @@ export default function App() {
 
           <div key="positions" className="card">
             <div className="card-drag">
-              <h2>Posições</h2>
+              <h2><ArrowUpRight size={16} /> Posições</h2>
             </div>
             <PositionsTable positions={positions} />
           </div>
 
           <div key="balances" className="card">
             <div className="card-drag">
-              <h2>Saldos</h2>
+              <h2><Wallet size={16} /> Saldos</h2>
             </div>
             <BalancesTable balances={balances} />
           </div>
 
           <div key="paper" className="card">
             <div className="card-drag">
-              <h2>Paper</h2>
+              <h2><LayoutGrid size={16} /> Paper</h2>
             </div>
             <PaperCard paper={paper} />
           </div>
 
           <div key="risk" className="card">
             <div className="card-drag">
-              <h2>Risco</h2>
+              <h2><ShieldAlert size={16} /> Risco</h2>
             </div>
             <RiskCard risk={risk} />
           </div>
 
           <div key="science" className="card science-card">
             <div className="card-drag">
-              <h2>Ciência — laudo estatístico</h2>
+              <h2><FlaskConical size={16} /> Ciência — laudo estatístico</h2>
             </div>
             <ScienceCard report={science} />
           </div>
 
           <div key="markets" className="card markets-card">
             <div className="card-drag">
-              <h2>Mercados globais — radar macro</h2>
+              <h2><Globe size={16} /> Mercados globais — radar macro</h2>
             </div>
             <MarketsCard markets={markets} />
           </div>
 
           <div key="convergence" className="card">
             <div className="card-drag">
-              <h2>Convergência — laboratório vivo</h2>
+              <h2><Brain size={16} /> Convergência — laboratório vivo</h2>
             </div>
             <ConvergenceCard conv={convergence} />
           </div>
 
           <div key="chat" className="card chat-card">
             <div className="card-drag">
-              <h2>Copiloto IA</h2>
+              <h2><Bot size={16} /> Copiloto IA</h2>
             </div>
             <ChatCard client={client} />
           </div>
 
           <div key="orders" className="card orders-card">
             <div className="card-drag">
-              <h2>Ordens</h2>
+              <h2><ArrowDownRight size={16} /> Ordens</h2>
             </div>
             <OrdersPanel client={client} orders={orders} onSubmitted={refresh} />
           </div>
 
           <div key="timeline" className="card timeline-card">
             <div className="card-drag">
-              <h2>Timeline</h2>
+              <h2><Activity size={16} /> Timeline</h2>
             </div>
             <Timeline events={timeline} />
           </div>
           </Grid>
         )}
       </main>
+      <CoinsSidebar client={client} onSelect={setChartSymbol} />
+      </div>
     </div>
   );
 }
