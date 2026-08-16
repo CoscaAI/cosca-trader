@@ -408,10 +408,18 @@ func main() {
 					gateMu.Unlock()
 					continue // já na direção sinalizada — não repete
 				}
-				gate[sig.Symbol] = sig.Side
-				gateMu.Unlock()
+			gate[sig.Symbol] = sig.Side
+			gateMu.Unlock()
 
-				// F4B — sizing por risco: se COSCA_TRADER_RISK_PER_TRADE_PCT
+			// Filtro macro (missão do Don): não operar CONTRA o regime global.
+			// risk-off + compra e risk-on + venda são bloqueados — remar contra
+			// a maré é a forma mais rápida de queimar capital.
+			if allow, reason := marketindex.GateTrade(macroRegime(), sig.Side); !allow {
+				log.Printf("⛔ strategy %s: sinal %s %s BLOQUEADO pelo filtro macro — %s", strat.Name(), sig.Side, sig.Symbol, reason)
+				continue
+			}
+
+			// F4B — sizing por risco: se COSCA_TRADER_RISK_PER_TRADE_PCT
 				// estiver definido, a quantidade é calculada para perder no
 				// máximo equity×riskPct se o stop for atingido. Senão, usa a
 				// quantidade fixa da estratégia.
