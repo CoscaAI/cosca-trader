@@ -823,6 +823,10 @@ export default function App() {
   const [timeline, setTimeline] = useState<StreamEvent[]>([]);
   const [timeframe, setTimeframe] = useState<string>("1h");
   const [chartSymbol, setChartSymbol] = useState<string>("BTCUSDT");
+  // Ref espelho do símbolo do gráfico: o SSE não reconecta a cada clique; o
+  // handler do stream filtra candles/ticks pelo símbolo atual via esta ref.
+  const chartSymbolRef = useRef(chartSymbol);
+  chartSymbolRef.current = chartSymbol;
   const [layout, setLayout] = useState<GridLayoutItem[]>(() => loadLayout());
   // Largura real do container (medida com ResizeObserver) — o grid usa ela,
   // senão os cards amontoam no canto.
@@ -966,12 +970,14 @@ export default function App() {
     const onEvent = (ev: StreamEvent) => {
       if (ev.type === "market.tick") {
         const t = ev.payload as TickPayload | null;
-        if (t && typeof t?.price === "number") setLastPrice(t);
+        if (t && typeof t?.price === "number" && t.symbol === chartSymbolRef.current) {
+          setLastPrice(t);
+        }
         return;
       }
       if (ev.type === "market.candle_closed") {
         const c = ev.payload as CandlePayload | null;
-        if (c && typeof c?.open === "number") {
+        if (c && typeof c?.open === "number" && c.symbol === chartSymbolRef.current) {
           setCandles((prev) =>
             prev.length && prev[prev.length - 1].open_time === c.open_time
               ? prev

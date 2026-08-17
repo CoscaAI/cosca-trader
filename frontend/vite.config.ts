@@ -47,6 +47,7 @@ export default defineConfig({
       "/convergence": coreProxy(),
       "/markets": coreProxy(),
       "/candles": coreProxy(),
+      "/coins": coreProxy(),
     },
   },
 });
